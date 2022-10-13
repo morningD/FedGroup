@@ -1,14 +1,19 @@
+from timeit import timeit
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as transforms
-import os
 from PIL import Image
 from pathlib import Path
-from utils.fedbn_data_utils import DigitsDataset, OfficeDataset, DomainNetDataset
-import logging
-from nilearn.datasets import fetch_abide_pcp
+import logging, copy, time
+import concurrent.futures
+from nilearn.datasets import fetch_abide_pcp, fetch_atlas_harvard_oxford
+from nilearn.maskers import NiftiLabelsMasker
+import nibabel as nib
+import matplotlib.pyplot as plt
+import h5py
 
+from utils.fedbn_data_utils import DigitsDataset, OfficeDataset, DomainNetDataset
 
 # The default databases path is <FedGroup>/data
 # In most cases, no modification is needed
@@ -33,7 +38,7 @@ def read_federated_data(dsname, data_base_path=None):
     if dsname == 'domainnet':
         train_loaders, val_loaders, test_loaders = read_domainnet()
     if dsname == 'abide':
-        fetch_abide()
+        read_abide()
     pass
 
 
@@ -276,23 +281,110 @@ def read_domainnet():
     Dataset URL: https://fcon_1000.projects.nitrc.org/indi/abide/abide_I.html
     nilearn source code: https://github.com/nilearn/nilearn/blob/d628bf6b/nilearn/datasets/func.py#L857
 """
-def fetch_abide():
+def read_abide():
     data_path = Path(_data_base_path).joinpath('ABIDE') # The default data download path = <FedGroup>/data/ABIDE
     Path.mkdir(data_path, exist_ok=True) # Create a new dir if no exist
-    # fetch_abide_pcp will return sklearn Bunch with 
-    # {'description': <str>, 'phenotypic': <np.recarray>, func_preproc: <list>}
-    data = fetch_abide_pcp(data_dir=data_path, legacy_format=True)
-    for k in data:
-        print(k, type(data[k]))
-    print(data['func_preproc'][0])
-    print(data['phenotypic'].dtype.names)
-    print(np.unique(data['phenotypic']['SITE_ID'], return_counts=True))
     
-    pass
+    """ Fetch ABIDE I data and Parcellate it by Harvard-Oxford (HO) atlas
+    Input: data_path-> File directory of ABIDE I dataset 
+    Return: path_signal_dict-> A dict with {Nifti file path <str>: Transformed signals <np.array>}
+            path_site_dict-> Dict with {Nifti file path <str>: Label <int i.e. 1=Austism or 2=Control>}
+    """ 
+    def _fetch_transform_abide(data_path):
+
+        # fetch_abide_pcp() will download preprocessed ABIDE I data from amazon and return sklearn Bunch with
+        # {'description': <str>, description of ABIDE I
+        # 'phenotypic': <np.recarray>, additional participants' data
+        # 'func_preproc': <list>}, list of scan file proxy paths with nii.gz format (can load by Nibable)
+        abide = fetch_abide_pcp(data_dir=data_path, legacy_format=True)
+        
+        # path_label_dict: {'./Caltech_0051461_func_preproc.nii.gz': 1=Austism or 2=Control, ...}
+        path_label_dict = {}
+        for idx, fpath in enumerate(abide.func_preproc[-5:]):
+            path_label_dict[fpath] = abide.phenotypic['DX_GROUP'][idx]
+
+        # Download Harvard-Oxford atlas
+        atlas = fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm', data_dir=data_path) # It is a 3D deterministic atlas
+        # Instantiate the masker with label image and label values
+        masker = NiftiLabelsMasker(atlas.maps,
+                                labels=atlas.labels,
+                                standardize=True)
+        
+        # Transform the nii.gz scan images to signals
+        def _transform_scan2signal(site_path):
+            masker_local = copy.deepcopy(masker)
+            signal = masker_local.fit_transform(site_path)
+            print(Path(site_path).name, ':', signal.shape)
+            del masker_local
+            return site_path, signal
+        
+        path_signal_dict = {}
+        # This multithread implementation take 74.9s for 20 files with 4 workers
+        # We use ThreadPoolExecutor to parral the parallelize the image to signal operation
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:        
+            for result in executor.map(_transform_scan2signal, abide.func_preproc):
+                path, signal = result[0], result[1]
+                path_signal_dict[path] = signal
+
+        """ This single thread implementation take 112.8s for 20 files
+        for path in abide.func_preproc:
+            signal = masker.fit_transform(path)
+            path_signal_dict[path] = signal
+        """
+        return path_signal_dict, path_label_dict
     
+    # Check the exist of cached signal HDF5 file, if there is no cached file in data_path,
+    # We need to download ABIDE I dataset and preprocess it.
+    cached_filename = 'abide1_transformed_signal.h5'
+    cached_h5_path = data_path.joinpath(cached_filename)
+    if Path.is_file(cached_h5_path) is False:
+        
+        # Download ABIDE I data and get transformed signals and labels data
+        path_signal_dict, path_label_dict = _fetch_transform_abide(data_path)
+
+        # We can't save the whole path because HDF5 will have confusion of seperator '/',
+        # here, we merge data by site name (i.e. UCLA, NYU, ...)
+        sitename_data_dict = {}
+        for path in path_signal_dict:
+            site_name = Path(path).name.split('_')[0]
+            # sitename_data_dict-> {sitename: list of tuple like (signal, label, path)}
+            signal, label = path_signal_dict[path], path_label_dict[path]
+            data_tuple = (signal, label, path)
+            sitename_data_dict.setdefault(site_name, []).append(data_tuple)
+
+        # Save these signals data to a HDF5 file
+        with h5py.File(cached_h5_path, 'w') as h5f:
+            for site, data_list in sitename_data_dict.items():
+                # Create a new group with site name
+                grp = h5f.require_group(site)
+                # Create HDF5 datasets to save signals and labels, note that the timeseries data in x have variable length
+                grp.create_dataset('x', data=[data_tuple[0] for data_tuple in data_list])
+                grp.create_dataset('y', data=[data_tuple[1] for data_tuple in data_list])
+                # We save the time series length for every scan record
+                grp.create_dataset('length', data=[data_tuple[0].shape[0] for data_tuple in data_list])
+                # We also save the origin path to provide recovery support
+                grp.create_dataset('path', data=[data_tuple[2] for data_tuple in data_list])
+    """
+    with h5py.File(cached_h5_path, 'r') as h5f:
+        print(list(h5f.keys()))
+        print(h5f['SBL']['x'].shape, h5f['SBL']['y'][:3], h5f['SBL']['length'][:3], h5f['SBL']['path'][:3])
+    """
 
 # For debug
 def _test_read_digits():
     percent = 1.0
     batch = 32
     train_loaders, test_loader = read_digits(percent, batch)
+
+'''
+('i', 'Unnamed: 0', 'SUB_ID', 'X', 'subject', 'SITE_ID', 'FILE_ID', 'DX_GROUP', 'DSM_IV_TR', 'AGE_AT_SCAN', 'SEX', 'HANDEDNESS_CATEGORY', 'HANDEDNESS_SCORES', 'FIQ', 'VIQ', 'PIQ', 'FIQ_TEST_TYPE', 'VIQ_TEST_TYPE', 
+'PIQ_TEST_TYPE', 'ADI_R_SOCIAL_TOTAL_A', 'ADI_R_VERBAL_TOTAL_BV', 'ADI_RRB_TOTAL_C', 'ADI_R_ONSET_TOTAL_D', 'ADI_R_RSRCH_RELIABLE', 'ADOS_MODULE', 'ADOS_TOTAL', 'ADOS_COMM', 'ADOS_SOCIAL', 'ADOS_STEREO_BEHAV', 
+'ADOS_RSRCH_RELIABLE', 'ADOS_GOTHAM_SOCAFFECT', 'ADOS_GOTHAM_RRB', 'ADOS_GOTHAM_TOTAL', 'ADOS_GOTHAM_SEVERITY', 'SRS_VERSION', 'SRS_RAW_TOTAL', 'SRS_AWARENESS', 'SRS_COGNITION', 'SRS_COMMUNICATION', 'SRS_MOTIVATION', 
+'SRS_MANNERISMS', 'SCQ_TOTAL', 'AQ_TOTAL', 'COMORBIDITY', 'CURRENT_MED_STATUS', 'MEDICATION_NAME', 'OFF_STIMULANTS_AT_SCAN', 'VINELAND_RECEPTIVE_V_SCALED', 'VINELAND_EXPRESSIVE_V_SCALED', 'VINELAND_WRITTEN_V_SCALED', 
+'VINELAND_COMMUNICATION_STANDARD', 'VINELAND_PERSONAL_V_SCALED', 'VINELAND_DOMESTIC_V_SCALED', 'VINELAND_COMMUNITY_V_SCALED', 'VINELAND_DAILYLVNG_STANDARD', 'VINELAND_INTERPERSONAL_V_SCALED', 'VINELAND_PLAY_V_SCALED', 
+'VINELAND_COPING_V_SCALED', 'VINELAND_SOCIAL_STANDARD', 'VINELAND_SUM_SCORES', 'VINELAND_ABC_STANDARD', 'VINELAND_INFORMANT', 'WISC_IV_VCI', 'WISC_IV_PRI', 'WISC_IV_WMI', 'WISC_IV_PSI', 'WISC_IV_SIM_SCALED', 
+'WISC_IV_VOCAB_SCALED', 'WISC_IV_INFO_SCALED', 'WISC_IV_BLK_DSN_SCALED', 'WISC_IV_PIC_CON_SCALED', 'WISC_IV_MATRIX_SCALED', 'WISC_IV_DIGIT_SPAN_SCALED', 'WISC_IV_LET_NUM_SCALED', 'WISC_IV_CODING_SCALED', 'WISC_IV_SYM_SCALED', 
+'EYE_STATUS_AT_SCAN', 'AGE_AT_MPRAGE', 'BMI', 'anat_cnr', 'anat_efc', 'anat_fber', 'anat_fwhm', 'anat_qi1', 'anat_snr', 'func_efc', 'func_fber', 'func_fwhm', 'func_dvars', 'func_outlier', 'func_quality', 'func_mean_fd', 
+'func_num_fd', 'func_perc_fd', 'func_gsr', 'qc_rater_1', 'qc_notes_rater_1', 'qc_anat_rater_2', 'qc_anat_notes_rater_2', 'qc_func_rater_2', 'qc_func_notes_rater_2', 'qc_anat_rater_3', 'qc_anat_notes_rater_3', 
+'qc_func_rater_3', 'qc_func_notes_rater_3', 'SUB_IN_SMP')
+'''

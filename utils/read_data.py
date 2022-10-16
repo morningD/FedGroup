@@ -7,18 +7,17 @@ from PIL import Image
 from pathlib import Path
 import logging, copy, time
 import concurrent.futures
+import pickle, h5py
 from nilearn.datasets import fetch_abide_pcp, fetch_atlas_harvard_oxford
 from nilearn.maskers import NiftiLabelsMasker
 import nibabel as nib
 import matplotlib.pyplot as plt
-import h5py
 
 from utils.fedbn_data_utils import DigitsDataset, OfficeDataset, DomainNetDataset
 
 # The default databases path is <FedGroup>/data
 # In most cases, no modification is needed
 _data_base_path = str(Path(__file__).parent.parent.joinpath('data').absolute())
-
 """
 Load datasets from files
 In:     Dataset Name (str)
@@ -38,7 +37,7 @@ def read_federated_data(dsname, data_base_path=None):
     if dsname == 'domainnet':
         train_loaders, val_loaders, test_loaders = read_domainnet()
     if dsname == 'abide':
-        read_abide()
+        read_abide(percent=0.5, batch=32)
     pass
 
 
@@ -280,95 +279,151 @@ def read_domainnet():
 """ Autism Brain Imaging Data Exchange I Dataset 
     Dataset URL: https://fcon_1000.projects.nitrc.org/indi/abide/abide_I.html
     nilearn source code: https://github.com/nilearn/nilearn/blob/d628bf6b/nilearn/datasets/func.py#L857
+    Input:  percent-> how many sites' data are involved; batch-> batch_size
 """
-def read_abide():
+def read_abide(percent=0.5, batch=32):
     data_path = Path(_data_base_path).joinpath('ABIDE') # The default data download path = <FedGroup>/data/ABIDE
     Path.mkdir(data_path, exist_ok=True) # Create a new dir if no exist
     
-    """ Fetch ABIDE I data and Parcellate it by Harvard-Oxford (HO) atlas
+    # Check the exist of cached signal pickle file, if there is no cached file in data_path,
+    # we need to download ABIDE I dataset and preprocess it first.
+    cached_filename = 'abide1_transformed_signal.pkl'
+    cached_pkl_path = data_path.joinpath(cached_filename)
+    
+    if Path.is_file(cached_pkl_path) is False:
+        # Download ABIDE I data and get transformed signals and labels data
+        # sitename_data_dict-> {sitename: list of tuple like (signal, label, length, path)}
+        sitename_data_dict = _fetch_transform_abide(cached_pkl_path)
+        sitenames = ' '.join(sitename_data_dict.keys())
+        logging.debug('Download and transform ABIDE data: {}'.format(sitenames))
+
+    """ Preprocess the data, including: 
+        1, Retain larger sites' data according to 'precent'
+        2, Padding the signals to fix length
+        3, Train/Test split by the site (split by domain)
+        4, Save the preprocessed data
+    """
+    _preprocess_abide(cached_pkl_path, percent)
+    
+
+""" Fetch ABIDE I data and Parcellate it by Harvard-Oxford (HO) atlas
     Input: data_path-> File directory of ABIDE I dataset 
     Return: path_signal_dict-> A dict with {Nifti file path <str>: Transformed signals <np.array>}
             path_site_dict-> Dict with {Nifti file path <str>: Label <int i.e. 1=Austism or 2=Control>}
-    """ 
-    def _fetch_transform_abide(data_path):
-
-        # fetch_abide_pcp() will download preprocessed ABIDE I data from amazon and return sklearn Bunch with
-        # {'description': <str>, description of ABIDE I
-        # 'phenotypic': <np.recarray>, additional participants' data
-        # 'func_preproc': <list>}, list of scan file proxy paths with nii.gz format (can load by Nibable)
-        abide = fetch_abide_pcp(data_dir=data_path, legacy_format=True)
-        
-        # path_label_dict: {'./Caltech_0051461_func_preproc.nii.gz': 1=Austism or 2=Control, ...}
-        path_label_dict = {}
-        for idx, fpath in enumerate(abide.func_preproc[-5:]):
-            path_label_dict[fpath] = abide.phenotypic['DX_GROUP'][idx]
-
-        # Download Harvard-Oxford atlas
-        atlas = fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm', data_dir=data_path) # It is a 3D deterministic atlas
-        # Instantiate the masker with label image and label values
-        masker = NiftiLabelsMasker(atlas.maps,
-                                labels=atlas.labels,
-                                standardize=True)
-        
-        # Transform the nii.gz scan images to signals
-        def _transform_scan2signal(site_path):
-            masker_local = copy.deepcopy(masker)
-            signal = masker_local.fit_transform(site_path)
-            print(Path(site_path).name, ':', signal.shape)
-            del masker_local
-            return site_path, signal
-        
-        path_signal_dict = {}
-        # This multithread implementation take 74.9s for 20 files with 4 workers
-        # We use ThreadPoolExecutor to parral the parallelize the image to signal operation
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:        
-            for result in executor.map(_transform_scan2signal, abide.func_preproc):
-                path, signal = result[0], result[1]
-                path_signal_dict[path] = signal
-
-        """ This single thread implementation take 112.8s for 20 files
-        for path in abide.func_preproc:
-            signal = masker.fit_transform(path)
-            path_signal_dict[path] = signal
-        """
-        return path_signal_dict, path_label_dict
+""" 
+def _fetch_transform_abide(cached_pkl_path):
+    # Save directory of ABIDE I data
+    data_path = cached_pkl_path.parent
+    # fetch_abide_pcp() will download preprocessed ABIDE I data from amazon and return sklearn Bunch with
+    # {'description': <str>, description of ABIDE I
+    # 'phenotypic': <np.recarray>, additional participants' data
+    # 'func_preproc': <list>}, list of scan file proxy paths with nii.gz format (can load by Nibable)
+    abide = fetch_abide_pcp(data_dir=data_path, legacy_format=True)
     
-    # Check the exist of cached signal HDF5 file, if there is no cached file in data_path,
-    # We need to download ABIDE I dataset and preprocess it.
-    cached_filename = 'abide1_transformed_signal.h5'
-    cached_h5_path = data_path.joinpath(cached_filename)
-    if Path.is_file(cached_h5_path) is False:
-        
-        # Download ABIDE I data and get transformed signals and labels data
-        path_signal_dict, path_label_dict = _fetch_transform_abide(data_path)
+    # path_label_dict: {'./Caltech_0051461_func_preproc.nii.gz': 1=Austism or 2=Control, ...}
+    path_label_dict = {}
+    for idx, fpath in enumerate(abide.func_preproc):
+        path_label_dict[fpath] = abide.phenotypic['DX_GROUP'][idx]
 
-        # We can't save the whole path because HDF5 will have confusion of seperator '/',
-        # here, we merge data by site name (i.e. UCLA, NYU, ...)
-        sitename_data_dict = {}
-        for path in path_signal_dict:
-            site_name = Path(path).name.split('_')[0]
-            # sitename_data_dict-> {sitename: list of tuple like (signal, label, path)}
-            signal, label = path_signal_dict[path], path_label_dict[path]
-            data_tuple = (signal, label, path)
-            sitename_data_dict.setdefault(site_name, []).append(data_tuple)
+    # Download Harvard-Oxford atlas
+    atlas = fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm', data_dir=data_path) # It is a 3D deterministic atlas
+    # Instantiate the masker with label image and label values
+    masker = NiftiLabelsMasker(atlas.maps,
+                            labels=atlas.labels,
+                            standardize=True)
+    
+    # Transform the nii.gz scan images to signals
+    def _transform_scan2signal(site_path, verbose=True):
+        masker_local = copy.deepcopy(masker)
+        signal = masker_local.fit_transform(site_path)
+        if verbose:
+            print('Transformed:', Path(site_path).name, ':', signal.shape) # Debug
+        del masker_local
+        return site_path, signal
+    
+    path_signal_dict = {}
+    # This multithread implementation take 74.9s for 20 files with 4 workers
+    # We use ThreadPoolExecutor to parral the parallelize the image to signal operation
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:        
+        for result in executor.map(_transform_scan2signal, abide.func_preproc):
+            path, signal = result[0], result[1]
+            path_signal_dict[path] = signal
 
-        # Save these signals data to a HDF5 file
-        with h5py.File(cached_h5_path, 'w') as h5f:
-            for site, data_list in sitename_data_dict.items():
-                # Create a new group with site name
-                grp = h5f.require_group(site)
-                # Create HDF5 datasets to save signals and labels, note that the timeseries data in x have variable length
-                grp.create_dataset('x', data=[data_tuple[0] for data_tuple in data_list])
-                grp.create_dataset('y', data=[data_tuple[1] for data_tuple in data_list])
-                # We save the time series length for every scan record
-                grp.create_dataset('length', data=[data_tuple[0].shape[0] for data_tuple in data_list])
-                # We also save the origin path to provide recovery support
-                grp.create_dataset('path', data=[data_tuple[2] for data_tuple in data_list])
+    """ This single thread implementation take 112.8s for 20 files
+    for path in abide.func_preproc:
+        signal = masker.fit_transform(path)
+        path_signal_dict[path] = signal
     """
-    with h5py.File(cached_h5_path, 'r') as h5f:
-        print(list(h5f.keys()))
-        print(h5f['SBL']['x'].shape, h5f['SBL']['y'][:3], h5f['SBL']['length'][:3], h5f['SBL']['path'][:3])
-    """
+
+    # Here, we merge data by site name (i.e. UCLA, NYU, ...)
+    sitename_data_dict = {}
+    for path in path_signal_dict:
+        site_name = Path(path).name.split('_')[0]
+        # sitename_data_dict-> {sitename: list of tuple like (signal, label, length, path)}
+        signal, label = path_signal_dict[path], path_label_dict[path]
+        data_tuple = (signal, label, signal.shape[0], path)
+        sitename_data_dict.setdefault(site_name, []).append(data_tuple)
+
+    # Save these signals data to a pickle file
+    with open(cached_pkl_path, 'wb') as pklf:
+        pickle.dump(sitename_data_dict, pklf)
+
+    return sitename_data_dict
+
+""" Preprocess ABIDE
+"""
+def _preprocess_abide(cached_pkl_path, percent):
+    with open(cached_pkl_path, 'rb') as pklf:
+        sitename_data_dict = pickle.load(pklf)
+    
+    # Sort the data dict with scan file size large->small
+    sitename_data_dict = dict(sorted(sitename_data_dict.items(), key=lambda item: len(item[1]), reverse=True))
+    keep_site_count = int(len(sitename_data_dict) * percent)
+    # The names of site will be retained large->small
+    keep_site_name = list(sitename_data_dict.keys())[:keep_site_count]
+    sitenames = ' '.join(keep_site_name)
+    logging.debug('Retained site names: {}'.format(sitenames))
+    
+    # The max number of scan images (time series length)
+    max_len = 300
+    logging.debug('The max number of scan images is {:d}'.format(max_len))
+
+    for name in keep_site_name:
+        for idx, data_tuple in enumerate(sitename_data_dict[name]):
+            data_len = data_tuple[2]
+            
+            if data_len > max_len:
+                # Truncate the time series to (max_len, num_features)
+                truncated_signal = data_tuple[0][:max_len]
+                sitename_data_dict[name][idx] = (truncated_signal, *data_tuple[1:])
+                logging.debug('The scan data in {} has been truncated to {:d}'.format(
+                    sitename_data_dict[name][idx][3], max_len))
+            else:
+                # Paded the series to max length, new shape = (max_len, num_features)
+                pad_width = int(max_len - data_len)
+                # Pad with zero value according to:
+                # https://github.com/nilearn/nilearn/blob/98a3ee060b55aa073118885d11cc6a1cecd95059/nilearn/regions/signal_extraction.py#L128
+                pad_signal = np.pad(data_tuple[0], ((pad_width, 0), (0, 0)), 'constant', constant_values=0)
+                sitename_data_dict[name][idx] = (pad_signal, *data_tuple[1:])
+                logging.debug('The scan data in {} has been padded to {:d}'.format(
+                    sitename_data_dict[name][idx][3], max_len))
+            
+    # Train/Test split
+    test_ratio = 1/3
+    train_h5_path = Path(cached_pkl_path).parent.joinpath('abide1_train.h5')
+    test_h5_path = Path(cached_pkl_path).parent.joinpath('abide1_test.h5')
+    K = int(keep_site_count * (1- test_ratio))
+    # Largest K sites for training, remains for testing
+    with h5py.File(train_h5_path, 'w') as ta, h5py.File(test_h5_path, 'w') as te:
+        for name in keep_site_name:
+            h5writer = ta if name in keep_site_name[:K] else te
+            grp = h5writer.require_group(name)
+            signals = np.stack([tuple[0] for tuple in sitename_data_dict[name]], axis=0)
+            labels = np.array([tuple[1] for tuple in sitename_data_dict[name]], dtype=np.uint8)
+            grp.create_dataset('x', data=signals)
+            grp.create_dataset('y', data=labels)
+    
+    return train_h5_path.absolute, test_h5_path.absolute
 
 # For debug
 def _test_read_digits():

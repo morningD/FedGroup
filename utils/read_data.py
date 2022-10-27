@@ -1,3 +1,4 @@
+from termios import VMIN
 from timeit import timeit
 import numpy as np
 import torch
@@ -281,21 +282,21 @@ def read_domainnet():
     nilearn source code: https://github.com/nilearn/nilearn/blob/d628bf6b/nilearn/datasets/func.py#L857
     Input:  percent-> how many sites' data are involved; batch-> batch_size
 """
-def read_abide(percent=0.5, batch=32):
+def read_abide(percent=0.5, batch=32, strategy='correlation'):
     data_path = Path(_data_base_path).joinpath('ABIDE') # The default data download path = <FedGroup>/data/ABIDE
     Path.mkdir(data_path, exist_ok=True) # Create a new dir if no exist
     
     # Check the exist of cached signal pickle file, if there is no cached file in data_path,
     # we need to download ABIDE I dataset and preprocess it first.
     cached_filename = 'abide1_transformed_signal.pkl'
-    cached_pkl_path = data_path.joinpath(cached_filename)
+    cached_pkl_path = data_path.joinpath(cached_filename).absolute()
     
     if Path.is_file(cached_pkl_path) is False:
         # Download ABIDE I data and get transformed signals and labels data
         # sitename_data_dict-> {sitename: list of tuple like (signal, label, length, path)}
         sitename_data_dict = _fetch_transform_abide(cached_pkl_path)
         sitenames = ' '.join(sitename_data_dict.keys())
-        logging.debug('Download and transform ABIDE data: {}'.format(sitenames))
+        logging.debug(f'Download and transform ABIDE data: {sitenames}')
 
     """ Preprocess the data, including: 
         1, Retain larger sites' data according to 'precent'
@@ -303,7 +304,9 @@ def read_abide(percent=0.5, batch=32):
         3, Train/Test split by the site (split by domain)
         4, Save the preprocessed data
     """
-    _preprocess_abide(cached_pkl_path, percent)
+    train_h5_path, test_h5_path =  _preprocess_abide(cached_pkl_path, percent, strategy)
+
+    return cached_pkl_path, train_h5_path, test_h5_path
     
 
 """ Fetch ABIDE I data and Parcellate it by Harvard-Oxford (HO) atlas
@@ -372,7 +375,7 @@ def _fetch_transform_abide(cached_pkl_path):
 
 """ Preprocess ABIDE
 """
-def _preprocess_abide(cached_pkl_path, percent):
+def _preprocess_abide(cached_pkl_path, percent, strategy='correlation'):
     with open(cached_pkl_path, 'rb') as pklf:
         sitename_data_dict = pickle.load(pklf)
     
@@ -382,48 +385,73 @@ def _preprocess_abide(cached_pkl_path, percent):
     # The names of site will be retained large->small
     keep_site_name = list(sitename_data_dict.keys())[:keep_site_count]
     sitenames = ' '.join(keep_site_name)
-    logging.debug('Retained site names: {}'.format(sitenames))
-    
-    # The max number of scan images (time series length)
-    max_len = 300
-    logging.debug('The max number of scan images is {:d}'.format(max_len))
+    logging.debug(f'Retained site names: {sitenames}')
 
-    for name in keep_site_name:
-        for idx, data_tuple in enumerate(sitename_data_dict[name]):
-            data_len = data_tuple[2]
+    # Pad the signals to same length
+    if strategy == 'timeseries':    
+        # The max number of scan images (time series length)
+        max_len = 300
+        logging.debug(f'The max number of scan images is {max_len}')
+
+        for name in keep_site_name:
+            for idx, data_tuple in enumerate(sitename_data_dict[name]):
+                data_len = data_tuple[2]
+                
+                if data_len > max_len:
+                    # Truncate the time series to (max_len, num_features)
+                    truncated_signal = data_tuple[0][:max_len]
+                    sitename_data_dict[name][idx] = (truncated_signal, *data_tuple[1:])
+                    logging.debug('The scan data in {} has been truncated to {:d}'.format(
+                        sitename_data_dict[name][idx][3], max_len))
+                else:
+                    # Paded the series to max length, new shape = (max_len, num_features)
+                    pad_width = int(max_len - data_len)
+                    # Pad with zero value according to:
+                    # https://github.com/nilearn/nilearn/blob/98a3ee060b55aa073118885d11cc6a1cecd95059/nilearn/regions/signal_extraction.py#L128
+                    pad_signal = np.pad(data_tuple[0], ((pad_width, 0), (0, 0)), 'constant', constant_values=0)
+                    sitename_data_dict[name][idx] = (pad_signal, *data_tuple[1:])
+                    logging.debug('The scan data in {} has been padded to {:d}'.format(
+                        sitename_data_dict[name][idx][3], max_len))
+    
+    if strategy == 'correlation':
+        # Correlation[-1, +1] -> [-∞, +∞], Ref: https://en.wikipedia.org/wiki/Fisher_transformation
+        # Use API from nilearn: <nilearn.connectome.ConnectivityMeasure>, LedoitWolf estimator is used
+        for name in keep_site_name:
+            from nilearn.connectome import ConnectivityMeasure
+            # Only use lower triangular parts of correlation matrix and w/o diagonal elements, flatten into 1D
+            # i.e. The correlation value in (2,1) (3,1) (3,2) (4,1) (4,2) (4,3) ...
+            connv_measure = ConnectivityMeasure(kind='correlation', vectorize=True, discard_diagonal=True)
+            connectivity = connv_measure.fit_transform([tuple[0] for tuple in sitename_data_dict[name]])
+            # Repalce the signals data with functional connectivity
+            for idx, data_tuple in enumerate(sitename_data_dict[name]):
+                # add newaxis to reshape the 1D correlation into 2D
+                sitename_data_dict[name][idx] = (connectivity[idx][np.newaxis,:], *data_tuple[1:])
             
-            if data_len > max_len:
-                # Truncate the time series to (max_len, num_features)
-                truncated_signal = data_tuple[0][:max_len]
-                sitename_data_dict[name][idx] = (truncated_signal, *data_tuple[1:])
-                logging.debug('The scan data in {} has been truncated to {:d}'.format(
-                    sitename_data_dict[name][idx][3], max_len))
-            else:
-                # Paded the series to max length, new shape = (max_len, num_features)
-                pad_width = int(max_len - data_len)
-                # Pad with zero value according to:
-                # https://github.com/nilearn/nilearn/blob/98a3ee060b55aa073118885d11cc6a1cecd95059/nilearn/regions/signal_extraction.py#L128
-                pad_signal = np.pad(data_tuple[0], ((pad_width, 0), (0, 0)), 'constant', constant_values=0)
-                sitename_data_dict[name][idx] = (pad_signal, *data_tuple[1:])
-                logging.debug('The scan data in {} has been padded to {:d}'.format(
-                    sitename_data_dict[name][idx][3], max_len))
-            
+            """ Deprecated: The maximum-liklihood estimate will yield some zero variaces, so we use LedoitWolf instead.
+            fisher_transormation = True
+            for idx, data_tuple in enumerate(sitename_data_dict[name]):
+                # We just use maximum-liklihood estimate
+                corr = np.corrcoef(data_tuple[0], rowvar=False)
+                coor_uptri = corr[np.triu_indices(corr.shape[0], k=1)].reshape(1,-1)
+                connectivity = np.arctanh(coor_uptri) if fisher_transormation else coor_uptri
+            """
+
     # Train/Test split
     test_ratio = 1/3
-    train_h5_path = Path(cached_pkl_path).parent.joinpath('abide1_train.h5')
-    test_h5_path = Path(cached_pkl_path).parent.joinpath('abide1_test.h5')
+    train_h5_path = Path(cached_pkl_path).parent.joinpath(f'abide1_{strategy}_train.h5')
+    test_h5_path = Path(cached_pkl_path).parent.joinpath(f'abide1_{strategy}_test.h5')
     K = int(keep_site_count * (1- test_ratio))
     # Largest K sites for training, remains for testing
     with h5py.File(train_h5_path, 'w') as ta, h5py.File(test_h5_path, 'w') as te:
         for name in keep_site_name:
             h5writer = ta if name in keep_site_name[:K] else te
             grp = h5writer.require_group(name)
-            signals = np.stack([tuple[0] for tuple in sitename_data_dict[name]], axis=0)
-            labels = np.array([tuple[1] for tuple in sitename_data_dict[name]], dtype=np.uint8)
-            grp.create_dataset('x', data=signals)
-            grp.create_dataset('y', data=labels)
+            x = np.stack([tuple[0] for tuple in sitename_data_dict[name]], axis=0)
+            y = np.array([tuple[1] for tuple in sitename_data_dict[name]], dtype=np.uint8)
+            grp.create_dataset('x', data=x)
+            grp.create_dataset('y', data=y)
     
-    return train_h5_path.absolute, test_h5_path.absolute
+    return train_h5_path.absolute(), test_h5_path.absolute()
 
 # For debug
 def _test_read_digits():

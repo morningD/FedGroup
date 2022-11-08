@@ -13,6 +13,12 @@ from sklearn.decomposition import TruncatedSVD
 from torchvision.transforms import ToTensor
 from torch.utils.data.dataloader import DataLoader
 from sklearn.preprocessing import StandardScaler
+import pandas as pd
+from itertools import combinations
+import concurrent.futures
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import LeaveOneOut
+import copy
 
 # Read ABIDE data
 cached_pkl_path, train_h5_path, test_h5_path = read_abide(percent=0.5, strategy='correlation')
@@ -156,12 +162,173 @@ def plot_mnist_raw_tsne():
     sns.scatterplot(x=embs[:,0], y=embs[:,1], hue=targets, palette=sns.color_palette("hls", n_classes))
     plt.savefig(save_images_path.joinpath(f'tsne_MNIST_raw_all.png'), dpi=500)
 
+def plot_signals_histogram(pkl_path):
+    with open(pkl_path, 'rb') as pf:
+        sitename_data_dict = pickle.load(pf)
+    print(sitename_data_dict.keys())
+    
+    sub_sitenames = list(sitename_data_dict.keys())[:5]
+    sitename_signal_list = []
+    uid = 0
+    for site in sub_sitenames:
+        for tuple in sitename_data_dict[site]:
+            signals_per_uid = tuple[0].reshape(-1).tolist()
+            label = tuple[1]
+            for s in signals_per_uid:
+                sitename_signal_list.append((uid, site, s, label))
+            uid += 1
+
+    sites_signals_df = pd.DataFrame(sitename_signal_list, columns=['uid', 'site', 'signal', 'label'])
+    fig = plt.figure(figsize=(10,10))
+    print(sites_signals_df.groupby('site').var())
+    print(sites_signals_df.groupby('site').mean())
+    sns.histplot(data=sites_signals_df, x='signal', hue='site', stat= 'probability', element='poly')
+    plt.savefig(save_images_path.joinpath(f'hist_ABIDE_signals_all.png'), dpi=500)
+    #print(sites_signals_df)
+
+def plot_corr_ROId_heatmap(corr_path, atlas):
+    atlas_image = np.asanyarray(atlas['maps'].dataobj)
+    ROI_names = atlas['labels'][1:] # The label:0 is Backgroud
+    ROI_labels = list(range(1,len(ROI_names)+1)) # The int label of each ROI
+    n_labels = len(ROI_labels)
+    affine = atlas['maps'].affine
+
+    # Store the ROIs center coordinates in the reference (anatomy) space
+    centers = [] 
+    # 1, Calculate the voxel center of each ROI region
+    for la in ROI_labels:
+        indices = np.argwhere(atlas_image==la)
+        c = indices.mean(axis=0)
+        centers.append(c)
+    centers = np.vstack(centers)
+
+    # 2, Voxel space -> Anatomy spacea
+    from nibabel.affines import apply_affine
+    anat_centers = apply_affine(affine, centers)
+    
+    # 3, Calculate the pairwise (anatomy space) distance between two ROI
+    from sklearn.metrics.pairwise import euclidean_distances
+    distance = euclidean_distances(anat_centers)
+
+    # 4, Load correlations and labels of each site
+    data_dict = {}
+    n_features = int(n_labels * (n_labels - 1) / 2) # Lower triangular parts of correlation matrix
+    target_map = {1:'Austism', 2:'Control'}
+    with h5py.File(corr_path, 'r') as h5f:
+        for site_name, grp in h5f.items():
+            corr_vector = np.array(grp['x'])
+            target_vector = np.array(grp['y']) # 1=Austism or 2=Control
+            n_samples = corr_vector.shape[0]
+            corr_vector = corr_vector.reshape(n_samples, n_features)
+            data_dict[site_name] = [corr_vector, target_vector]
+
+    # 5, We choose the lastest subject's connectome as the typical connection strength 
+    typical_conn = corr_vector[-1, :] # shape = (n_features,)
+
+    ''' IMPORTANT Configurationsn '''
+    # We group features to bins, the setting is:
+    min_d, max_d, num_dbins = 0, 150, 30 # Distance bins
+    min_c, max_c, num_cbins = -0.5, +1.0, 30 # Connectome bin
+    d_iterval, c_iterval = (max_d - min_d)/num_dbins, (max_c - min_c)/num_cbins 
+
+    # We calculate the accuarcy group by bin for each site
+    for site_name, [corr_vector, target_vector] in data_dict.items():
+        bin_dict = {}
+        # Bin each feature, for each feature, we calcualte the bin number,
+        # note: idx, x, y start from 0 (the first ROI region, no blackground)
+        for idx, x, y in zip(range(n_features), *np.tril_indices(n_labels, k=-1)):
+            conn_strength = typical_conn[idx]
+            cbin = 0 if conn_strength < 0 else min(int((conn_strength-min_c)/c_iterval), num_cbins-1)
+            conn_distance = distance[x][y]
+            dbin = 0 if conn_distance < 0 else min(int((conn_distance-min_d)/d_iterval), num_dbins-1)
+            bin_dict.setdefault((cbin, dbin), []).append(idx)
+
+        acc_list = []
+        for c in range(num_cbins):
+            for d in range(num_dbins):
+                if (c,d) in bin_dict:
+                    fids = bin_dict[(c,d)]
+                else:
+                    fids = []
+                    bin_dict.setdefault((c, d), [])
+                
+                # Train a Linear classifier for each site and each features (connectome)
+                acc = _fit_test(corr_vector[:, fids], target_vector)
+                acc_list.append((c, d, acc, fids))
+                print(f'Site: {site_name}, BIN-{c}-{d}, Acc: {acc}')
+        
+        df = pd.DataFrame(acc_list, columns=['cbin', 'dbin', 'accuracy', 'feature_ids'])
+        # Save results
+        df.to_csv(save_images_path.joinpath(f'{site_name}_corr_ROId.csv'))
+
+        # We plot the heatmap of each site
+        df = pd.read_csv(save_images_path.joinpath(f'{site_name}_corr_ROId.csv'))
+        fig = plt.figure(figsize=(10,9))
+        ax = sns.heatmap(df.pivot('cbin', 'dbin', 'accuracy'), cmap='Spectral', vmin=0.40, vmax=0.65, linewidths=1, linecolor='black', annot=True)
+        ax.invert_yaxis()
+        plt.savefig(save_images_path.joinpath(f'{site_name}_corr_ROId_heatmap.png'), dpi=500)
+
+
+    ''' # Plot Atlas image
+    fig = plt.figure()
+    plt.imshow(atlas_image[26,:,:].T, cmap='gray', origin='lower')
+    plt.savefig(save_images_path.joinpath(f'test_scan.png'), dpi=500)
+    quit()
+    '''
+
+'''# Deprecated: Multi-thread can't work with sklearn, I dont know the reason
+# Warp the fit_test function with cbin, dbin info
+def _calculate_bin_wrapper(argv):
+    # Just need cbin, dbin information from each thread
+    cbin, dbin = argv[0], argv[1]
+    fit_test_arg = argv[2:]
+    print(f'Handling {cbin}-{dbin}')
+    return cbin, dbin, _fit_test(*fit_test_arg)
+'''
+
+# Define the train and test procedure
+def _fit_test(data, label):
+    if data is None or data.size == 0:
+        acc = np.nan # Return NaN if no features in this bin
+        return acc
+    
+    # Leave-One-Out ensemblly train linear regression model
+    correct = 0
+    n_samples, n_features = data.shape[0], data.shape[1]
+    estimator = LinearRegression()
+    for train_idx, test_idx, in LeaveOneOut().split(data):
+        X_train, X_test = data[train_idx], data[test_idx]
+        y_train, y_test = label[train_idx], label[test_idx]
+
+        # We just use this feature to predict the label if there only has one feature
+        if n_features == 1:
+            # Note: X_train only has one feature
+            reg = estimator.fit(X_train, y_train).predict(X_test)
+            # target_map = {1:'Austism', 2:'Control'}
+            pred = 1 if abs(reg-1) < abs(reg-2) else 2
+        
+        # We use any two features to predict the label, the average regression score is used to prediction
+        if n_features > 1:
+            preds = []
+            for fids in combinations(range(n_features), 2):
+                reg = estimator.fit(X_train[:, fids], y_train).predict(X_test[:, fids])
+                # target_map = {1:'Austism', 2:'Control'}
+                preds.append(1 if abs(reg-1) < abs(reg-2) else 2)
+            pred = 1 if len([i for i in preds if i == 1]) > len(preds)/2 else 2
+        if pred == y_test:
+            correct += 1.0
+    acc = correct / n_samples
+    return acc
+
 #plot_correlation_matrix(train_h5_path, atlas)
 #plot_correlation_matrix(test_h5_path, atlas)
 #plot_ABIDE_raw_tsne(train_h5_path)
 #plot_domainnet_raw_tsne()
-plot_svhn_raw_tsne()
+#plot_svhn_raw_tsne()
 #plot_mnist_raw_tsne()
+#plot_signals_histogram(cached_pkl_path)
+plot_corr_ROId_heatmap(train_h5_path, atlas)
+
 """
     import seaborn as sns
     plt.figure(figsize=(12,10))

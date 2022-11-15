@@ -453,6 +453,30 @@ def _preprocess_abide(cached_pkl_path, percent, strategy='correlation'):
     
     return train_h5_path.absolute(), test_h5_path.absolute()
 
+''' Read the abide data dict from h5py file, the format is consistent with _preprocess_abide() '''
+def read_abide_h5file(h5_path, flatten=False, merge=False):
+    data_dict = {}
+    with h5py.File(h5_path, 'r') as h5f:
+        for site_name, grp in h5f.items():
+            data_X = np.array(grp['x'])
+            data_y = np.array(grp['y']) # 1=Austism or 2=Control
+            
+            if flatten == True: 
+                # Flatten the X to (n_samples, n_features)
+                data_X = data_X.reshape(data_X.shape[0], -1)
+            data_dict[site_name] = [data_X, data_y]
+    
+    if merge == True:
+        merged_sitenames = '-'.join(data_dict.keys())
+        data_X_list, data_y_list = [], []
+        for [data_X, data_y] in data_dict.values():
+            data_X_list.append(data_X)
+            data_y_list.append(data_y)
+        print(merged_sitenames, np.unique(np.hstack(data_y_list), return_counts=True))
+        return dict({merged_sitenames: [np.vstack(data_X_list), np.hstack(data_y_list)]})
+
+    return data_dict
+
 # For debug
 def _test_read_digits():
     percent = 1.0

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from nilearn.datasets import  fetch_atlas_harvard_oxford
-from utils.read_data import read_abide, read_domainnet
+from utils.read_data import read_abide, read_domainnet, read_abide_h5file
 import pickle, h5py
 import numpy as np
 from sklearn.manifold import TSNE
@@ -17,7 +17,9 @@ import pandas as pd
 from itertools import combinations
 import concurrent.futures
 from sklearn.linear_model import LinearRegression
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.model_selection import LeaveOneOut
+from sklearn.metrics import f1_score, accuracy_score
 import copy
 
 # Read ABIDE data
@@ -186,7 +188,7 @@ def plot_signals_histogram(pkl_path):
     plt.savefig(save_images_path.joinpath(f'hist_ABIDE_signals_all.png'), dpi=500)
     #print(sites_signals_df)
 
-def plot_corr_ROId_heatmap(corr_path, atlas):
+def plot_corr_ROId_heatmap(train_corr_path, atlas, strategy='loo', ext_corr_path=None):
     atlas_image = np.asanyarray(atlas['maps'].dataobj)
     ROI_names = atlas['labels'][1:] # The label:0 is Backgroud
     ROI_labels = list(range(1,len(ROI_names)+1)) # The int label of each ROI
@@ -211,26 +213,29 @@ def plot_corr_ROId_heatmap(corr_path, atlas):
     distance = euclidean_distances(anat_centers)
 
     # 4, Load correlations and labels of each site
-    data_dict = {}
     n_features = int(n_labels * (n_labels - 1) / 2) # Lower triangular parts of correlation matrix
     target_map = {1:'Austism', 2:'Control'}
-    with h5py.File(corr_path, 'r') as h5f:
-        for site_name, grp in h5f.items():
-            corr_vector = np.array(grp['x'])
-            target_vector = np.array(grp['y']) # 1=Austism or 2=Control
-            n_samples = corr_vector.shape[0]
-            corr_vector = corr_vector.reshape(n_samples, n_features)
-            data_dict[site_name] = [corr_vector, target_vector]
+    data_dict = read_abide_h5file(train_corr_path, flatten=True, merge=False)
+    if ext_corr_path is not None:
+        ext_data_dict = read_abide_h5file(ext_corr_path, flatten=True, merge=True)
 
-    # 5, We choose the lastest subject's connectome as the typical connection strength 
-    typical_conn = corr_vector[-1, :] # shape = (n_features,)
+    # 5, We choose the a control subject's connectome from first site as the typical connection strength
+    [corr_vector, target_vector] = list(data_dict.values())[-1]
+    for idx, label in enumerate(target_vector.tolist()):
+        if label == 2:
+            typical_conn = corr_vector[idx, :] # shape = (n_features,)
+            break
 
     ''' IMPORTANT Configurationsn '''
     # We group features to bins, the setting is:
-    min_d, max_d, num_dbins = 0, 150, 30 # Distance bins
-    min_c, max_c, num_cbins = -0.5, +1.0, 30 # Connectome bin
+    min_d, max_d, num_dbins = 0, 150, 20 # Distance bins
+    min_c, max_c, num_cbins = -0.5, +1.0, 20 # Connectome bin
     d_iterval, c_iterval = (max_d - min_d)/num_dbins, (max_c - min_c)/num_cbins 
-
+    
+    ''' # DEBUG CODE
+    [ext_corr_vector, ext_target_vector] = data_dict['UM']
+    data_dict = {i:data_dict[i] for i in data_dict if i in ['Leuven']}
+    '''
     # We calculate the accuarcy group by bin for each site
     for site_name, [corr_vector, target_vector] in data_dict.items():
         bin_dict = {}
@@ -243,7 +248,7 @@ def plot_corr_ROId_heatmap(corr_path, atlas):
             dbin = 0 if conn_distance < 0 else min(int((conn_distance-min_d)/d_iterval), num_dbins-1)
             bin_dict.setdefault((cbin, dbin), []).append(idx)
 
-        acc_list = []
+        rst_list = []
         for c in range(num_cbins):
             for d in range(num_dbins):
                 if (c,d) in bin_dict:
@@ -253,20 +258,30 @@ def plot_corr_ROId_heatmap(corr_path, atlas):
                     bin_dict.setdefault((c, d), [])
                 
                 # Train a Linear classifier for each site and each features (connectome)
-                acc = _fit_test(corr_vector[:, fids], target_vector)
-                acc_list.append((c, d, acc, fids))
-                print(f'Site: {site_name}, BIN-{c}-{d}, Acc: {acc}')
-        
-        df = pd.DataFrame(acc_list, columns=['cbin', 'dbin', 'accuracy', 'feature_ids'])
+                if strategy == 'loo':
+                    # Using Leave-One-Out strategy
+                    rst = _LOO_fit_test(corr_vector[:, fids], target_vector)
+                    print(f'Site: {site_name}, BIN-{c}-{d}, Acc: {rst}')
+                elif strategy == 'external':
+                    # Use the data from external site for testing
+                    [ext_corr_vector, ext_target_vector] = next(iter(ext_data_dict.values()))
+                    rst = _external_fit_test(corr_vector[:, fids], target_vector, ext_corr_vector[:, fids], ext_target_vector)
+                    print(f'Site: {site_name}, BIN-{c}-{d}, F1-score: {rst}')
+                else:
+                    pass
+                rst_list.append((c, d, rst, fids, len(fids)))
+                
+        df = pd.DataFrame(rst_list, columns=['cbin', 'dbin', 'result', 'feature_ids', 'num_features'])
         # Save results
-        df.to_csv(save_images_path.joinpath(f'{site_name}_corr_ROId.csv'))
+        df.to_csv(save_images_path.joinpath(f'corr-ROId-{strategy}_{site_name}.csv'))
 
         # We plot the heatmap of each site
-        df = pd.read_csv(save_images_path.joinpath(f'{site_name}_corr_ROId.csv'))
+        df = pd.read_csv(save_images_path.joinpath(f'corr-ROId-{strategy}_{site_name}.csv'))
         fig = plt.figure(figsize=(10,9))
-        ax = sns.heatmap(df.pivot('cbin', 'dbin', 'accuracy'), cmap='Spectral', vmin=0.40, vmax=0.65, linewidths=1, linecolor='black', annot=True)
+        ax = sns.heatmap(df.pivot('cbin', 'dbin', 'result'), cmap='coolwarm', \
+            vmin=0.40, vmax=0.70, center=0.5, linewidths=1, linecolor='black')
         ax.invert_yaxis()
-        plt.savefig(save_images_path.joinpath(f'{site_name}_corr_ROId_heatmap.png'), dpi=500)
+        plt.savefig(save_images_path.joinpath(f'corr-ROId-{strategy}_{site_name}.png'), dpi=500)
 
 
     ''' # Plot Atlas image
@@ -286,16 +301,18 @@ def _calculate_bin_wrapper(argv):
     return cbin, dbin, _fit_test(*fit_test_arg)
 '''
 
-# Define the train and test procedure
-def _fit_test(data, label):
+# Define the Leave-One-Out train and test procedure
+def _LOO_fit_test(data, label):
     if data is None or data.size == 0:
         acc = np.nan # Return NaN if no features in this bin
         return acc
     
     # Leave-One-Out ensemblly train linear regression model
-    correct = 0
+    y_pred = []
     n_samples, n_features = data.shape[0], data.shape[1]
-    estimator = LinearRegression()
+    #estimator = LinearRegression()
+    estimator = KNeighborsClassifier(3)
+    
     for train_idx, test_idx, in LeaveOneOut().split(data):
         X_train, X_test = data[train_idx], data[test_idx]
         y_train, y_test = label[train_idx], label[test_idx]
@@ -309,16 +326,54 @@ def _fit_test(data, label):
         
         # We use any two features to predict the label, the average regression score is used to prediction
         if n_features > 1:
-            preds = []
+            ensem_preds = []
             for fids in combinations(range(n_features), 2):
                 reg = estimator.fit(X_train[:, fids], y_train).predict(X_test[:, fids])
                 # target_map = {1:'Austism', 2:'Control'}
-                preds.append(1 if abs(reg-1) < abs(reg-2) else 2)
-            pred = 1 if len([i for i in preds if i == 1]) > len(preds)/2 else 2
-        if pred == y_test:
-            correct += 1.0
-    acc = correct / n_samples
-    return acc
+                ensem_preds.append(1 if abs(reg-1) < abs(reg-2) else 2)
+            pred = 1 if len([i for i in ensem_preds if i == 1]) > len(ensem_preds)/2 else 2
+        y_pred.append(pred)
+        
+    #acc = accuracy_score(label, y_pred) # Accuracy is ill-suited for comparison of imbalanced dataset
+    score = f1_score(label, y_pred)
+    return score
+
+def _external_fit_test(data, label, ext_data, ext_label):
+
+    if data is None or data.size == 0:
+        f1 = np.nan # Return NaN if no features in this bin
+        return f1
+    
+    n_samples, n_features = data.shape[0], data.shape[1]
+    # Ensemblly train linear regression model
+    #estimator = LinearRegression()
+    # KNN model
+    estimator = KNeighborsClassifier(n_neighbors=5)
+    
+    X_train, X_test = data, ext_data
+    y_train, y_test = label, ext_label
+
+    # We just use this feature to predict the label if there only has one feature
+    if n_features == 1:
+        # Note: X_train only has one feature, X_test.shape = (n_samples, 1)
+        regs = estimator.fit(X_train, y_train).predict(X_test)
+        # target_map = {1:'Austism', 2:'Control'}
+        preds = np.array([1 if abs(reg-1) < abs(reg-2) else 2 for reg in regs])
+    
+    # We use any two features to predict the label, the average regression score is used to prediction
+    if n_features > 1:
+        preds_list = []
+        for fids in combinations(range(n_features), 2):
+            regs = estimator.fit(X_train[:, fids], y_train).predict(X_test[:, fids])
+            # target_map = {1:'Austism', 2:'Control'}
+            preds_list.append(np.array([1 if abs(reg-1) < abs(reg-2) else 2 for reg in regs]))
+
+        preds = np.zeros(y_test.size)
+        for idx in range(y_test.size):
+            preds[idx] = 1 if len([1 for subpreds in preds_list if subpreds[idx] == 1]) > len(preds_list)/2 else 2
+    
+    f1 = f1_score(y_test, preds, pos_label=1) # Note: pos_label is Austism=1
+    return f1
 
 #plot_correlation_matrix(train_h5_path, atlas)
 #plot_correlation_matrix(test_h5_path, atlas)
@@ -327,8 +382,8 @@ def _fit_test(data, label):
 #plot_svhn_raw_tsne()
 #plot_mnist_raw_tsne()
 #plot_signals_histogram(cached_pkl_path)
-plot_corr_ROId_heatmap(train_h5_path, atlas)
-
+#plot_corr_ROId_heatmap(train_h5_path, atlas, strategy='external', ext_corr_path=test_h5_path)
+plot_corr_ROId_heatmap(train_h5_path, atlas, strategy='loo', ext_corr_path=test_h5_path)
 """
     import seaborn as sns
     plt.figure(figsize=(12,10))

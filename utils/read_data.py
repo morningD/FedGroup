@@ -1,20 +1,9 @@
-from termios import VMIN
-from timeit import timeit
-import numpy as np
 import torch
-from torch.utils.data import Dataset
 import torchvision.transforms as transforms
-from PIL import Image
 from pathlib import Path
-import logging, copy, time
-import concurrent.futures
-import pickle, h5py
-from nilearn.datasets import fetch_abide_pcp, fetch_atlas_harvard_oxford
-from nilearn.maskers import NiftiLabelsMasker
-import nibabel as nib
-import matplotlib.pyplot as plt
+import logging
 
-from utils.fedbn_data_utils import DigitsDataset, OfficeDataset, DomainNetDataset
+from utils.data_utils import DigitsDataset, OfficeDataset, DomainNetDataset, _fetch_transform_abide, _preprocess_abide
 
 # The default databases path is <FedGroup>/data
 # In most cases, no modification is needed
@@ -282,7 +271,7 @@ def read_domainnet():
     nilearn source code: https://github.com/nilearn/nilearn/blob/d628bf6b/nilearn/datasets/func.py#L857
     Input:  percent-> how many sites' data are involved; batch-> batch_size
 """
-def read_abide(percent=0.5, batch=32, strategy='correlation'):
+def read_abide(percent=0.5, batch=32, strategy='correlation', loader=False):
     data_path = Path(_data_base_path).joinpath('ABIDE') # The default data download path = <FedGroup>/data/ABIDE
     Path.mkdir(data_path, exist_ok=True) # Create a new dir if no exist
     
@@ -306,176 +295,11 @@ def read_abide(percent=0.5, batch=32, strategy='correlation'):
     """
     train_h5_path, test_h5_path =  _preprocess_abide(cached_pkl_path, percent, strategy)
 
+    if loader == True:
+        pass
+
     return cached_pkl_path, train_h5_path, test_h5_path
     
-
-""" Fetch ABIDE I data and Parcellate it by Harvard-Oxford (HO) atlas
-    Input: data_path-> File directory of ABIDE I dataset 
-    Return: path_signal_dict-> A dict with {Nifti file path <str>: Transformed signals <np.array>}
-            path_site_dict-> Dict with {Nifti file path <str>: Label <int i.e. 1=Austism or 2=Control>}
-""" 
-def _fetch_transform_abide(cached_pkl_path):
-    # Save directory of ABIDE I data
-    data_path = cached_pkl_path.parent
-    # fetch_abide_pcp() will download preprocessed ABIDE I data from amazon and return sklearn Bunch with
-    # {'description': <str>, description of ABIDE I
-    # 'phenotypic': <np.recarray>, additional participants' data
-    # 'func_preproc': <list>}, list of scan file proxy paths with nii.gz format (can load by Nibable)
-    abide = fetch_abide_pcp(data_dir=data_path, legacy_format=True)
-    
-    # path_label_dict: {'./Caltech_0051461_func_preproc.nii.gz': 1=Austism or 2=Control, ...}
-    path_label_dict = {}
-    for idx, fpath in enumerate(abide.func_preproc):
-        path_label_dict[fpath] = abide.phenotypic['DX_GROUP'][idx]
-
-    # Download Harvard-Oxford atlas
-    atlas = fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm', data_dir=data_path) # It is a 3D deterministic atlas
-    # Instantiate the masker with label image and label values
-    masker = NiftiLabelsMasker(atlas.maps,
-                            labels=atlas.labels,
-                            standardize=True)
-    
-    # Transform the nii.gz scan images to signals
-    def _transform_scan2signal(site_path, verbose=True):
-        masker_local = copy.deepcopy(masker)
-        signal = masker_local.fit_transform(site_path)
-        if verbose:
-            print('Transformed:', Path(site_path).name, ':', signal.shape) # Debug
-        del masker_local
-        return site_path, signal
-    
-    path_signal_dict = {}
-    # This multithread implementation take 74.9s for 20 files with 4 workers
-    # We use ThreadPoolExecutor to parral the parallelize the image to signal operation
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:        
-        for result in executor.map(_transform_scan2signal, abide.func_preproc):
-            path, signal = result[0], result[1]
-            path_signal_dict[path] = signal
-
-    """ This single thread implementation take 112.8s for 20 files
-    for path in abide.func_preproc:
-        signal = masker.fit_transform(path)
-        path_signal_dict[path] = signal
-    """
-
-    # Here, we merge data by site name (i.e. UCLA, NYU, ...)
-    sitename_data_dict = {}
-    for path in path_signal_dict:
-        site_name = Path(path).name.split('_')[0]
-        # sitename_data_dict-> {sitename: list of tuple like (signal, label, length, path)}
-        signal, label = path_signal_dict[path], path_label_dict[path]
-        data_tuple = (signal, label, signal.shape[0], path)
-        sitename_data_dict.setdefault(site_name, []).append(data_tuple)
-
-    # Save these signals data to a pickle file
-    with open(cached_pkl_path, 'wb') as pklf:
-        pickle.dump(sitename_data_dict, pklf)
-
-    return sitename_data_dict
-
-""" Preprocess ABIDE
-"""
-def _preprocess_abide(cached_pkl_path, percent, strategy='correlation'):
-    with open(cached_pkl_path, 'rb') as pklf:
-        sitename_data_dict = pickle.load(pklf)
-    
-    # Sort the data dict with scan file size large->small
-    sitename_data_dict = dict(sorted(sitename_data_dict.items(), key=lambda item: len(item[1]), reverse=True))
-    keep_site_count = int(len(sitename_data_dict) * percent)
-    # The names of site will be retained large->small
-    keep_site_name = list(sitename_data_dict.keys())[:keep_site_count]
-    sitenames = ' '.join(keep_site_name)
-    logging.debug(f'Retained site names: {sitenames}')
-
-    # Pad the signals to same length
-    if strategy == 'timeseries':    
-        # The max number of scan images (time series length)
-        max_len = 300
-        logging.debug(f'The max number of scan images is {max_len}')
-
-        for name in keep_site_name:
-            for idx, data_tuple in enumerate(sitename_data_dict[name]):
-                data_len = data_tuple[2]
-                
-                if data_len > max_len:
-                    # Truncate the time series to (max_len, num_features)
-                    truncated_signal = data_tuple[0][:max_len]
-                    sitename_data_dict[name][idx] = (truncated_signal, *data_tuple[1:])
-                    logging.debug('The scan data in {} has been truncated to {:d}'.format(
-                        sitename_data_dict[name][idx][3], max_len))
-                else:
-                    # Paded the series to max length, new shape = (max_len, num_features)
-                    pad_width = int(max_len - data_len)
-                    # Pad with zero value according to:
-                    # https://github.com/nilearn/nilearn/blob/98a3ee060b55aa073118885d11cc6a1cecd95059/nilearn/regions/signal_extraction.py#L128
-                    pad_signal = np.pad(data_tuple[0], ((pad_width, 0), (0, 0)), 'constant', constant_values=0)
-                    sitename_data_dict[name][idx] = (pad_signal, *data_tuple[1:])
-                    logging.debug('The scan data in {} has been padded to {:d}'.format(
-                        sitename_data_dict[name][idx][3], max_len))
-    
-    if strategy == 'correlation':
-        # Correlation[-1, +1] -> [-∞, +∞], Ref: https://en.wikipedia.org/wiki/Fisher_transformation
-        # Use API from nilearn: <nilearn.connectome.ConnectivityMeasure>, LedoitWolf estimator is used
-        for name in keep_site_name:
-            from nilearn.connectome import ConnectivityMeasure
-            # Only use lower triangular parts of correlation matrix and w/o diagonal elements, flatten into 1D
-            # i.e. The correlation value in (2,1) (3,1) (3,2) (4,1) (4,2) (4,3) ...
-            connv_measure = ConnectivityMeasure(kind='correlation', vectorize=True, discard_diagonal=True)
-            connectivity = connv_measure.fit_transform([tuple[0] for tuple in sitename_data_dict[name]])
-            # Repalce the signals data with functional connectivity
-            for idx, data_tuple in enumerate(sitename_data_dict[name]):
-                # add newaxis to reshape the 1D correlation into 2D
-                sitename_data_dict[name][idx] = (connectivity[idx][np.newaxis,:], *data_tuple[1:])
-            
-            """ Deprecated: The maximum-liklihood estimate will yield some zero variaces, so we use LedoitWolf instead.
-            fisher_transormation = True
-            for idx, data_tuple in enumerate(sitename_data_dict[name]):
-                # We just use maximum-liklihood estimate
-                corr = np.corrcoef(data_tuple[0], rowvar=False)
-                coor_uptri = corr[np.triu_indices(corr.shape[0], k=1)].reshape(1,-1)
-                connectivity = np.arctanh(coor_uptri) if fisher_transormation else coor_uptri
-            """
-
-    # Train/Test split
-    test_ratio = 1/3
-    train_h5_path = Path(cached_pkl_path).parent.joinpath(f'abide1_{strategy}_train.h5')
-    test_h5_path = Path(cached_pkl_path).parent.joinpath(f'abide1_{strategy}_test.h5')
-    K = int(keep_site_count * (1- test_ratio))
-    # Largest K sites for training, remains for testing
-    with h5py.File(train_h5_path, 'w') as ta, h5py.File(test_h5_path, 'w') as te:
-        for name in keep_site_name:
-            h5writer = ta if name in keep_site_name[:K] else te
-            grp = h5writer.require_group(name)
-            x = np.stack([tuple[0] for tuple in sitename_data_dict[name]], axis=0)
-            y = np.array([tuple[1] for tuple in sitename_data_dict[name]], dtype=np.uint8)
-            grp.create_dataset('x', data=x)
-            grp.create_dataset('y', data=y)
-    
-    return train_h5_path.absolute(), test_h5_path.absolute()
-
-''' Read the abide data dict from h5py file, the format is consistent with _preprocess_abide() '''
-def read_abide_h5file(h5_path, flatten=False, merge=False):
-    data_dict = {}
-    with h5py.File(h5_path, 'r') as h5f:
-        for site_name, grp in h5f.items():
-            data_X = np.array(grp['x'])
-            data_y = np.array(grp['y']) # 1=Austism or 2=Control
-            
-            if flatten == True: 
-                # Flatten the X to (n_samples, n_features)
-                data_X = data_X.reshape(data_X.shape[0], -1)
-            data_dict[site_name] = [data_X, data_y]
-    
-    if merge == True:
-        merged_sitenames = '-'.join(data_dict.keys())
-        data_X_list, data_y_list = [], []
-        for [data_X, data_y] in data_dict.values():
-            data_X_list.append(data_X)
-            data_y_list.append(data_y)
-        print(merged_sitenames, np.unique(np.hstack(data_y_list), return_counts=True))
-        return dict({merged_sitenames: [np.vstack(data_X_list), np.hstack(data_y_list)]})
-
-    return data_dict
 
 # For debug
 def _test_read_digits():

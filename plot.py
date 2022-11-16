@@ -1,10 +1,6 @@
-import concurrent.futures
-import copy
 import pickle
-from cProfile import label
 from itertools import combinations
 from pathlib import Path
-from tkinter import image_names
 
 import h5py
 import matplotlib.pyplot as plt
@@ -27,7 +23,7 @@ from utils.data_utils import read_abide_h5file
 from utils.read_data import read_abide, read_domainnet
 
 # Read ABIDE data
-cached_pkl_path, train_h5_path, test_h5_path = read_abide(percent=0.5, strategy='correlation')
+cached_pkl_path, train_h5_path, test_h5_path = read_abide(percent=0.5, strategy='correlation', return_loader=False)
 # Configurations of this plot script
 save_images_path = Path(__file__).parent.joinpath('plot_imgs').absolute()
 data_base_path = Path(cached_pkl_path).parent.parent.absolute()

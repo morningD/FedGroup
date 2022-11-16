@@ -10,33 +10,10 @@ from PIL import Image
 import os
 import numpy as np
 
-read_federated_data('abide')
+def main():
+    read_federated_data('abide')
 
-class ABIDE1Dataset(Dataset):
-    def __init__(self, base_path, train=True, transform=None):
-        if train:
-            filepath = '{}/ABIDE/abide1_correlation_train.h5'.format(base_path)
-        else:
-            filepath = '{}/ABIDE/abide1_correlation_test.h5'.format(base_path)
-            
-        label_dict = {'autism':1, 'control':2}
-        self.transform = transform
-        with h5py.File(filepath, 'r') as h5f:
-            self.images = np.concatenate([grp['x'] for grp in h5f.values()], axis=0).astype(np.float32)
-            self.labels = torch.from_numpy(np.concatenate([grp['y'] for grp in h5f.values()], axis=None))
-
-    def __len__(self):
-        return self.labels.shape[0]
-
-    def __getitem__(self, idx):
-        image = self.images[idx]
-        label = self.labels[idx] - 1
-
-        if self.transform is not None:
-            image = self.transform(image)
-
-        return image.cuda(), label.cuda()
-
+'''
 class ABIDE1Model(nn.Module):
     def __init__(self):
         super(ABIDE1Model, self).__init__()
@@ -124,5 +101,5 @@ def main():
         print('Train loss: {:.4f} | Train acc : {:.4f}'.format(loss,acc))
 
     test(abide_test_loader, loss_fn)
-
+'''
 main()

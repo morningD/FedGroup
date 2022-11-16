@@ -3,7 +3,7 @@ import torchvision.transforms as transforms
 from pathlib import Path
 import logging
 
-from utils.data_utils import DigitsDataset, OfficeDataset, DomainNetDataset, _fetch_transform_abide, _preprocess_abide
+from utils.data_utils import DigitsDataset, OfficeDataset, DomainNetDataset, _fetch_transform_abide, _preprocess_abide, create_abide_datasets
 
 # The default databases path is <FedGroup>/data
 # In most cases, no modification is needed
@@ -27,7 +27,7 @@ def read_federated_data(dsname, data_base_path=None):
     if dsname == 'domainnet':
         train_loaders, val_loaders, test_loaders = read_domainnet()
     if dsname == 'abide':
-        read_abide(percent=0.5, batch=32)
+        train_loaders, test_loaders = read_abide(percent=0.5, batch=32, return_loader=True)
     pass
 
 
@@ -271,7 +271,7 @@ def read_domainnet():
     nilearn source code: https://github.com/nilearn/nilearn/blob/d628bf6b/nilearn/datasets/func.py#L857
     Input:  percent-> how many sites' data are involved; batch-> batch_size
 """
-def read_abide(percent=0.5, batch=32, strategy='correlation', loader=False):
+def read_abide(percent=0.5, batch=32, strategy='correlation', return_loader=True):
     data_path = Path(_data_base_path).joinpath('ABIDE') # The default data download path = <FedGroup>/data/ABIDE
     Path.mkdir(data_path, exist_ok=True) # Create a new dir if no exist
     
@@ -295,13 +295,20 @@ def read_abide(percent=0.5, batch=32, strategy='correlation', loader=False):
     """
     train_h5_path, test_h5_path =  _preprocess_abide(cached_pkl_path, percent, strategy)
 
-    if loader == True:
-        pass
+    if return_loader == True:
+        transform = transforms.ToTensor()
+        
+        train_datasets = create_abide_datasets(train_h5_path, transform, is_train=True)
+        train_loaders = [torch.utils.data.DataLoader(ds, batch_size=batch, shuffle=True) for ds in train_datasets]
+        test_datasets = create_abide_datasets(test_h5_path, transform, is_train=False)
+        test_loaders = [torch.utils.data.DataLoader(ds, batch_size=batch, shuffle=False) for ds in test_datasets]
+        
+        return train_loaders, test_loaders 
 
     return cached_pkl_path, train_h5_path, test_h5_path
     
 
-# For debug
+# For debug purpose
 def _test_read_digits():
     percent = 1.0
     batch = 32

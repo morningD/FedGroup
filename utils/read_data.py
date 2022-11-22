@@ -13,13 +13,14 @@ Load datasets from files
 In:     Dataset Name (str)
 Out:    List of PyTorch Dataset
 """
-def read_federated_data(dsname, data_base_path=None):
+def read_federated_data(dsname:str, data_base_path=None):
 
     logging.basicConfig(filename='read_data.log', encoding='utf-8', level=logging.DEBUG, \
         format='%(asctime)s [%(filename)s:%(funcName)s:%(lineno)d] %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
 
     if data_base_path is not None: _data_base_path = data_base_path
     
+    val_loaders = None
     if dsname == 'digits':
         train_loaders, test_loaders = read_digits(percent=1.0, batch=32)
     if dsname == 'office':
@@ -28,7 +29,8 @@ def read_federated_data(dsname, data_base_path=None):
         train_loaders, val_loaders, test_loaders = read_domainnet()
     if dsname == 'abide':
         train_loaders, test_loaders = read_abide(percent=0.5, batch=32, return_loader=True)
-    pass
+    
+    return train_loaders, val_loaders, test_loaders
 
 
 """ Below <read_***> functions are borrowed from other FL codes,

@@ -1,0 +1,7 @@
+/data
+__pycache__
+/plot_imgs
+/.vscode
+*.log
+nohup.out
+

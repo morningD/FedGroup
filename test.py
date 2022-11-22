@@ -10,8 +10,17 @@ from PIL import Image
 import os
 import numpy as np
 
+from flearn.nnactor import NNActor
+from model.ABIDE.mlp import construct_model
+import torch.optim as optim
+from sklearn.metrics import f1_score, accuracy_score
+
 def main():
-    read_federated_data('abide')
+
+    train_loaders, _, test_loaders = read_federated_data('abide')
+    actor = NNActor(0, data_dict={'train': train_loaders[0]}, model=construct_model(), optimizer=optim.SGD, loss_fn=nn.CrossEntropyLoss, metric_fns=[accuracy_score, f1_score])
+    _, scores, loss, _, _ = actor.solve_steps(num_steps=30)
+    print(scores)
 
 '''
 class ABIDE1Model(nn.Module):

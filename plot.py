@@ -12,7 +12,7 @@ from nilearn.datasets import fetch_atlas_harvard_oxford
 from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import LinearRegression
 from sklearn.manifold import TSNE
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, balanced_accuracy_score
 from sklearn.model_selection import LeaveOneOut
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
@@ -232,10 +232,12 @@ def plot_corr_ROId_heatmap(train_corr_path, atlas, strategy='loo', ext_corr_path
     min_c, max_c, num_cbins = -0.5, +1.0, 20 # Connectome bin
     d_iterval, c_iterval = (max_d - min_d)/num_dbins, (max_c - min_c)/num_cbins 
     
-    ''' # DEBUG CODE
-    [ext_corr_vector, ext_target_vector] = data_dict['UM']
-    data_dict = {i:data_dict[i] for i in data_dict if i in ['Leuven']}
-    '''
+    # DEBUG CODE
+    [ext_corr_vector, ext_target_vector] = data_dict['UCLA']
+    #data_dict = {i:data_dict[i] for i in data_dict if i in ['NYU', 'UCLA', 'UM']}
+    data_dict = {i:data_dict[i] for i in data_dict if i in ['UM']}
+    
+
     # We calculate the accuarcy group by bin for each site
     for site_name, [corr_vector, target_vector] in data_dict.items():
         bin_dict = {}
@@ -279,7 +281,7 @@ def plot_corr_ROId_heatmap(train_corr_path, atlas, strategy='loo', ext_corr_path
         df = pd.read_csv(save_images_path.joinpath(f'corr-ROId-{strategy}_{site_name}.csv'))
         fig = plt.figure(figsize=(10,9))
         ax = sns.heatmap(df.pivot('cbin', 'dbin', 'result'), cmap='coolwarm', \
-            vmin=0.40, vmax=0.70, center=0.5, linewidths=1, linecolor='black')
+            vmin=-0.5, vmax=0.5, center=0, linewidths=1, linecolor='black')
         ax.invert_yaxis()
         plt.savefig(save_images_path.joinpath(f'corr-ROId-{strategy}_{site_name}.png'), dpi=500)
 
@@ -335,7 +337,8 @@ def _LOO_fit_test(data, label):
         y_pred.append(pred)
         
     #acc = accuracy_score(label, y_pred) # Accuracy is ill-suited for comparison of imbalanced dataset
-    score = f1_score(label, y_pred)
+    #score = f1_score(label, y_pred, pos_label=0)
+    score = balanced_accuracy_score(label, y_pred, adjusted=True)
     return score
 
 def _external_fit_test(data, label, ext_data, ext_label):
@@ -372,8 +375,9 @@ def _external_fit_test(data, label, ext_data, ext_label):
         for idx in range(y_test.size):
             preds[idx] = 1 if len([1 for subpreds in preds_list if subpreds[idx] == 1]) > len(preds_list)/2 else 2
     
-    f1 = f1_score(y_test, preds, pos_label=1) # Note: pos_label is Austism=1
-    return f1
+    #score = f1_score(y_test, preds, pos_label=1) # Note: pos_label is Austism=1
+    score = balanced_accuracy_score(y_test, preds, adjusted=True)
+    return score
 
 #plot_correlation_matrix(train_h5_path, atlas)
 #plot_correlation_matrix(test_h5_path, atlas)
@@ -382,8 +386,8 @@ def _external_fit_test(data, label, ext_data, ext_label):
 #plot_svhn_raw_tsne()
 #plot_mnist_raw_tsne()
 #plot_signals_histogram(cached_pkl_path)
-#plot_corr_ROId_heatmap(train_h5_path, atlas, strategy='external', ext_corr_path=test_h5_path)
-plot_corr_ROId_heatmap(train_h5_path, atlas, strategy='loo', ext_corr_path=test_h5_path)
+plot_corr_ROId_heatmap(train_h5_path, atlas, strategy='external', ext_corr_path=test_h5_path)
+#plot_corr_ROId_heatmap(train_h5_path, atlas, strategy='loo', ext_corr_path=test_h5_path)
 """
     import seaborn as sns
     plt.figure(figsize=(12,10))

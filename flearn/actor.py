@@ -8,20 +8,20 @@ like Server, Group, Client.
 '''
 
 class Actor(object):
-    def __init__(self, id, actor_type):
+    def __init__(self, id, actor_type='base'):
         self.id = id
         self.actor_type = actor_type
         self.task_type = 'default' # distinguish between tasks
         self.name = 'NULL'
         self.uplink, self.downlink = [], [] # init to empty, depend on the actor type
         # The state of this actor
-        self.state = {'trainable': False, 'testable': False}
+        self.state = {'trainable': False, 'testable': False, 'train_size':0, 'test_size':0}
 
         self.__preprocess()
 
     def __preprocess(self):
         # Give the name of actor, for example, 'client01', 'group01'
-        self.name = str(self.actor_type) + '_' + str(self.id)
+        self.name = f'{self.actor_type}_{self.id}'
 
     def set_task_type(self, task_type):
         self.task_type = task_type
@@ -113,7 +113,8 @@ class Actor(object):
         return
 
     # trainable and testable depend on actor type
-    def check_trainable():
-        return
-    def check_testable():
-        return
+    def check_trainable(self):
+        raise NotImplementedError
+    
+    def check_testable(self):
+        raise NotImplementedError

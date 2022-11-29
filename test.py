@@ -11,16 +11,30 @@ import os
 import numpy as np
 
 from flearn.nnactor import NNActor
+from flearn.server import Server
 from model.ABIDE.mlp import construct_model
 import torch.optim as optim
-from sklearn.metrics import f1_score, accuracy_score
+from utils.model_utils import accuracy, adjusted_balanced_accuracy, fscore
 
 def main():
 
     train_loaders, _, test_loaders = read_federated_data('abide')
-    actor = NNActor(0, data_dict={'train': train_loaders[0]}, model=construct_model(), optimizer=optim.SGD, loss_fn=nn.CrossEntropyLoss, metric_fns=[accuracy_score, f1_score])
-    _, scores, loss, _, _ = actor.solve_steps(num_steps=30)
-    print(scores)
+    '''
+    y_test = np.array([1, 1, 1, 1, 1, 2])
+    #preds = np.array([2, 2, 2, 2, 2, 2])
+    preds = np.array([1, 1, 1, 1, 1, 1])
+    print(f1_score(y_test, preds, pos_label=1))
+    print(balanced_accuracy_score(y_test, preds, adjusted=True))
+    '''
+
+    actor = NNActor(0, data_dict={'train': train_loaders[1], 'test': test_loaders[2]}, model=construct_model(), optimizer=optim.Adam, loss_fn=nn.CrossEntropyLoss, metric_fns=[accuracy, adjusted_balanced_accuracy])
+    
+    sever = Server(1)
+    print(sever.name)
+    num, scores, loss, _, _ = actor.solve_epochs(num_epochs=30)
+    print(num, scores)
+    num_samples, scores, loss = actor.test_locally()
+    print(num_samples, scores, loss)
 
 '''
 class ABIDE1Model(nn.Module):

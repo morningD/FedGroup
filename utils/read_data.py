@@ -19,8 +19,9 @@ def read_federated_data(dsname:str, data_base_path=None):
         format='%(asctime)s [%(filename)s:%(funcName)s:%(lineno)d] %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
 
     if data_base_path is not None: _data_base_path = data_base_path
-    
+
     val_loaders = None
+    dsname = dsname.lower()
     if dsname == 'digits':
         train_loaders, test_loaders = read_digits(percent=1.0, batch=32)
     if dsname == 'office':

@@ -2,12 +2,12 @@ from flearn.actor import Actor
 import logging
 
 class Server(Actor):
-    def __init__(self, id, local_actor=None):
+    def __init__(self, id, local_actor):
         super().__init__(id)
         # We can add a local actor to the server
         if local_actor is not None:
             self.local_actor = local_actor
-            self.actor_type = self.local_actor.acotr_type
+            self.actor_type = self.local_actor.actor_type
 
         self.actor_type = f'server:{self.actor_type}'
         self.name = f'{self.actor_type}_{self.id}'
@@ -24,6 +24,7 @@ class Server(Actor):
             return self.local_actor.check_trainable()
         
         # Check whether downlink nodes (actors) are trainable, fresh state
+        # Note: the train_size of server is the sum of train size of downlink nodes
         self.state['trainable'] = False
         if self.has_downlink():
             self.state['train_size'] = 0

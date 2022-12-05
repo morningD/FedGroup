@@ -15,10 +15,14 @@ from flearn.server import Server
 from model.ABIDE.mlp import construct_model
 import torch.optim as optim
 from utils.model_utils import accuracy, adjusted_balanced_accuracy, fscore
+import json
+from flearn.trainer.fedavg import FedAvg
 
 def main():
 
     train_loaders, _, test_loaders = read_federated_data('abide')
+
+
     '''
     y_test = np.array([1, 1, 1, 1, 1, 2])
     #preds = np.array([2, 2, 2, 2, 2, 2])
@@ -29,8 +33,6 @@ def main():
 
     actor = NNActor(0, data_dict={'train': train_loaders[1], 'test': test_loaders[2]}, model=construct_model(), optimizer=optim.Adam, loss_fn=nn.CrossEntropyLoss, metric_fns=[accuracy, adjusted_balanced_accuracy])
     
-    sever = Server(1)
-    print(sever.name)
     num, scores, loss, _, _ = actor.solve_epochs(num_epochs=30)
     print(num, scores)
     num_samples, scores, loss = actor.test_locally()

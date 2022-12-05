@@ -5,6 +5,7 @@ import torch.optim as optim
 from copy import deepcopy
 from collections import OrderedDict
 import numpy as np
+from utils.model_utils import calculate_model_state_difference
 
 '''
 DNN Actor with torch train and test functions
@@ -14,19 +15,26 @@ Args:
 '''
 class NNActor(Actor):
     def __init__(self, id, actor_type:str='base_nn', data_dict:dict={}, 
-                model:nn.Module=None, optimizer:optim=None, loss_fn=None, metric_fns=[]):
-        super(NNActor, self).__init__(id, actor_type)
+                model:nn.Module=None, optimizer:optim=optim.AdamW, loss_fn=None, metric_fns=[]):
+        super().__init__(id, actor_type)
         self.data_dict = data_dict
         self.model = model
         if optimizer is not None:
             #self.optimizer = optimizer(self.model.parameters(), lr=0.0001, momentum=0.9)
             self.optimizer = optimizer(self.model.parameters())
+
         if loss_fn is not None:
             self.loss_fn = loss_fn()
+        else:
+            # We use the defalut loss fun defined in module class
+            self.loss_fn = self.model.loss_fn()
+    
         self.metric_fns = metric_fns
         self.state.update({'init_params': None, 'latest_params': None, 'latest_updates': None, 
                             'local_soln': None, 'local_gradient': None, 'optimizer': None,
-                            'step_count': 0, 'scores': []})
+                            'train_scores_history': [], 'train_loss_history': [], 
+                            'test_scores_history': [], 'test_loss_history': [],
+                            'step_count': 0})
 
         # Note Because mantain the whole model for each client is expensive,
         # so we share the model object and just save the model state like dataloaders and state dict
@@ -65,6 +73,9 @@ class NNActor(Actor):
     # Return: number of training samples, list of training scores, list of training loss, new model parameters, model updates
     def train_locally(self):
         num_samples, train_scores, train_loss, t1_model_state, gradient = self.solve_epochs(self.local_epochs)
+        # Append the training history
+        self.state['train_scores_history'] += train_scores
+        self.state['train_loss_history'] += train_loss
         return num_samples, train_scores, train_loss, t1_model_state, gradient
 
     # The train procedure of NNActor is train locally
@@ -113,7 +124,8 @@ class NNActor(Actor):
             train_scores.append(scores)
 
         t1_model_state = deepcopy(self.model.state_dict())
-        gradient = OrderedDict({k: v1-v0 for k, v0, v1 in zip(t0_model_state.keys(), t0_model_state.values(), t1_model_state.values())})
+        #gradient = OrderedDict({k: v1-v0 for k, v0, v1 in zip(t0_model_state.keys(), t0_model_state.values(), t1_model_state.values())})
+        gradient = calculate_model_state_difference(t0_model_state, t1_model_state)
 
         if pretrain == True:
             # We don't update local solution and gradient if in pretrain mode
@@ -183,6 +195,8 @@ class NNActor(Actor):
         if self.check_testable() == False:
             return
         num_samples, test_scores, test_loss = self.test_locally()
+        self.state['test_scores_history'] += test_scores
+        self.state['test_loss_history'] += test_loss
         return num_samples, test_scores, test_loss
     
     ''' Test on the local test dataset'''

@@ -34,6 +34,10 @@ class ABIDE_MLP(nn.Module):
             nn.Dropout(),
             nn.Linear(8, 2)
         )
+        # The default loss function
+        self.loss_fn = nn.CrossEntropyLoss
+        # The default actor type
+        self.actor_type = 'NNActor'
 
     def forward(self, x):
         return self.clser(x)

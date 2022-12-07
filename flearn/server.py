@@ -28,7 +28,7 @@ class Server(Actor):
         self.state['trainable'] = False
         if self.has_downlink():
             self.state['train_size'] = 0
-            for node in self.downlink():
+            for node in self.downlink:
                 if node.check_trainable() == True:
                     self.state['trainable'] = True
                     self.state['train_size'] += node.state['train_size']
@@ -43,7 +43,7 @@ class Server(Actor):
         self.state['testable'] = False
         if self.has_downlink():
             self.state['test_size'] = 0
-            for node in self.downlink():
+            for node in self.downlink:
                 if node.check_testable() == True:
                     self.state['testable'] = True
                     self.state['test_size'] += node.state['test_size']
@@ -66,6 +66,7 @@ class Server(Actor):
         for node in valid_nodes:
             rlt = node.train()
             results.append(rlt)
+        return results
 
     def train_locally(self):
         if self.check_trainable(locally=True) == True:

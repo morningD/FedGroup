@@ -1,11 +1,12 @@
 from torch.utils.data import ConcatDataset, DataLoader
-from utils.trainer_utils import read_json_config, fix_seed
+from utils.trainer_utils import read_json_config, fix_seed, federated_boardcast, federated_averaging_aggregate
 from utils.read_data import read_federated_data
 from utils.model_utils import calculate_model_state_difference
 from pathlib import Path
 import importlib
 from flearn.server import Server
 import random
+import time
 
 _cfg_path = str(Path(__file__).parent.parent.parent.joinpath('utils').joinpath('config_template.json'))
 
@@ -45,19 +46,22 @@ class FedAvg(object):
             self.actor_type = self.model.actor_type
         actor_path = f'flearn.{self.actor_type.lower()}'
         actor_loader = getattr(importlib.import_module(actor_path), self.actor_type)
+        common_data_dict = {'le': client_cfg['local_epochs'], 'lr': client_cfg['learning_rate']}
+        
         # Create training and test clients
         if trainer_cfg['train_test_separate'] == False:
-            self.train_clients = [actor_loader(id=cid, model=self.model, data_dict=
-                                {'train': train_loaders[cid], 'test': test_loaders[cid], 'le': client_cfg['local_epochs']})
+            self.train_clients = [actor_loader(id=cid, model=self.model, data_dict={
+                                **common_data_dict, 'train': train_loaders[cid], 'test': test_loaders[cid]})
                                 for cid in range(self.num_train_clients)]
             self.test_clients = self.train_clients
         else:
-            self.train_clients = [actor_loader(id=cid, model=self.model, data_dict=
-                                {'train': train_loaders[cid], 'le': client_cfg['local_epochs']})
+            self.train_clients = [actor_loader(id=cid, model=self.model, data_dict={
+                                **common_data_dict, 'train': train_loaders[cid]})
                                 for cid in range(self.num_train_clients)]
-            self.test_clients = [actor_loader(id=int(cid+self.num_train_clients), model=self.model, data_dict=
-                                {'test': test_loaders[cid]})
+            self.test_clients = [actor_loader(id=int(cid+self.num_train_clients), model=self.model, data_dict={
+                                **common_data_dict, 'test': test_loaders[cid]})
                                 for cid in range(self.num_test_clients)]
+        
         # Create Server and the local actor for Server
         sid = -1
         server_data_dict = {}
@@ -69,16 +73,14 @@ class FedAvg(object):
         if trainer_cfg['eval_locally'] == True:
             # Test on server, testing data is the collection of all federated testing data
             test_datasets = [loader.dataset for loader in test_loaders]
-            server_data_dict['test'] = DataLoader(ConcatDataset(test_datasets), batch_size=64, shuffle=False) 
-        self.server = Server(id=sid, local_actor=actor_loader(sid, model=self.model, data_dict=server_data_dict))
+            server_data_dict['test'] = DataLoader(ConcatDataset(test_datasets), batch_size=64, shuffle=False)
+        self.server = Server(id=sid, local_actor=actor_loader(sid, model=self.model, data_dict={**server_data_dict, **common_data_dict}))
 
         ''' 4, Set the uplink for clients and downlink for server '''
         self.server.add_downlink(self.train_clients+self.test_clients)
         self.server.refresh()
         for c in self.train_clients + self.test_clients:
             c.add_uplink(self.server)
-
-        print(len(self.server.local_actor.test_loader.dataset))
 
     def train(self):
         for comm_round in range(self.num_rounds):
@@ -88,15 +90,26 @@ class FedAvg(object):
             ''' 1, Random select train clients '''
             selected_clients = self.select_train_clients(comm_round, self.clients_per_round)
 
-            ''' 2, Server boardcasts global model to clients '''
-            for c in selected_clients:
-                t0_global_model = self.server.local_actor.state['latest_params']
-                # The selected client calculate the latest_update (This may be many rounds apart)
-                c.state['latest_updates'] = calculate_model_state_difference(c.state['latest_updates'], t0_global_model)
-                # Set model parameters of clients to global model parameters
-                c.state['latest_params'] = t0_global_model
+            ''' 2, Server broadcasts global model to selected clients '''
+            federated_boardcast(self.server, selected_clients, actor_type=self.actor_type)
 
-            ''' 3, '''
+            ''' 3, Train selected clients or train server's local actor '''
+            start_time = time.time()
+            if self.train_locally == True:
+                train_results = self.server.train_locally()
+            else:
+                train_results = self.server.train(selected_clients)
+            train_time = round(time.time() - start_time, 3)
+
+            if train_results == None: continue
+            
+            ''' 4, Summary this round of training '''
+            # TODO: add code
+            nks, gradients = [rst[0] for rst in train_results], [rst[4] for rst in train_results]
+
+            ''' 5, Federated aggregate gradients '''
+            federated_averaging_aggregate(self.server, gradients, nks)
+
 
 
     def select_train_clients(self, comm_round, num_clients=20):
@@ -112,7 +125,7 @@ class FedAvg(object):
             list of selected clients objects
         '''
         # Get all trainable nodes from server's downlink
-        _, trainable_nodes = self.server.check_selected_trainable(self.downlink)
+        _, trainable_nodes = self.server.check_selected_trainable(self.server.downlink)
         num_clients = min(num_clients, len(trainable_nodes))
         if num_clients > 0:
             random.seed(comm_round+self.seed)  # make sure for each comparison, we are selecting the same clients each round
@@ -121,5 +134,6 @@ class FedAvg(object):
             return selected_clients
         else:
             return []
-        
+
 trainer = FedAvg('ABIDE', 'mlp', _cfg_path)
+trainer.train()

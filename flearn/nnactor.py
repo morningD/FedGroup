@@ -11,7 +11,7 @@ from utils.model_utils import calculate_model_state_difference
 DNN Actor with torch train and test functions
 Args:
     data_dict -> Configurations dict of nnactor: {'train': train data loader, 'test': test data loader, \
-        'le': local train epoch count, 'bs': train batch size} # TODO: Add more settings support
+        'le': local train epoch count, 'lr': learnning rate, 'bs': train batch size} # TODO: Add more settings support
 '''
 class NNActor(Actor):
     def __init__(self, id, actor_type:str='base_nn', data_dict:dict={}, 
@@ -21,7 +21,7 @@ class NNActor(Actor):
         self.model = model
         if optimizer is not None:
             #self.optimizer = optimizer(self.model.parameters(), lr=0.0001, momentum=0.9)
-            self.optimizer = optimizer(self.model.parameters())
+            self.optimizer = optimizer(self.model.parameters(), lr=self.data_dict['lr'])
 
         if loss_fn is not None:
             self.loss_fn = loss_fn()
@@ -42,6 +42,7 @@ class NNActor(Actor):
         self.__preprocess()
 
     def __preprocess(self):
+        self.train_loader, self.test_loader = None, None
         if 'train' in self.data_dict:
             self.train_loader = self.data_dict['train']
 
@@ -55,9 +56,9 @@ class NNActor(Actor):
 
             # Specify the local epoch
             if 'le' in self.data_dict:
-                self.local_epoch = self.data_dict['le']
+                self.local_epochs = self.data_dict['le']
             else:
-                self.local_epoch = 1
+                self.local_epochs = 1
             self.check_trainable()
 
         if 'test' in self.data_dict:
@@ -259,7 +260,18 @@ class NNActor(Actor):
             self.state['test_size'] = 0
         
         return self.state['testable']
-
+    
+    # Manually apply the gradient to the model parameters and fresh latest_update
+    # It is useful for apply aggregated gradients
+    @torch.no_grad()
+    def apply_gradient(self, gradients):
+        t0_params = deepcopy(self.state['latest_params'])
+        for name in gradients:
+            torch.add(self.state['latest_params'][name], gradients[name])
+        self.state['latest_updates'] = calculate_model_state_difference(t0_params, self.state['latest_params'])
+        del t0_params
+        return
+    
     def __load_state(self, is_train):
         if self.model is not None:
             self.model.load_state_dict(self.state['latest_params'])
@@ -267,5 +279,7 @@ class NNActor(Actor):
         if self.optimizer is not None and is_train == True:
             # Only load optimizer state when training
             self.optimizer.load_state_dict(self.state['optimizer'])
+
+
 
     def __difference_state(): pass

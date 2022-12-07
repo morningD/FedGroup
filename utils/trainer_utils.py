@@ -2,6 +2,7 @@ import json
 import torch
 import numpy as np
 import random
+from utils.model_utils import calculate_model_state_difference
 
 '''
     Read the config of trainer,
@@ -67,3 +68,62 @@ def fix_seed(seed=0):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
+
+# Defind the model boardcast procedure of federated traning
+def federated_boardcast(server, clients, actor_type='NNActor'):
+    if actor_type == 'NNActor':
+        for c in clients:
+            t0_global_model = server.local_actor.state['latest_params']
+            # The selected client calculate the latest_update (This may be many rounds apart)
+            c.state['latest_updates'] = calculate_model_state_difference(c.state['latest_params'], t0_global_model)
+            # Set model parameters of clients to global model parameters
+            c.state['latest_params'] = t0_global_model
+
+# This function disable gradient calculation
+@torch.no_grad()
+def federated_averaging_aggregate(server, gradients, nks):
+    actor_type = server.local_actor.model.actor_type
+    
+    # We can define difference aggregation strategy for difference actor type
+    if actor_type == 'NNActor':
+        agg_gradient_dict = __weighted_aggregate_model_dict(gradients, nks)
+        server.local_actor.apply_gradient(agg_gradient_dict)
+        return 
+
+def __weighted_aggregate_model_dict(gradients, weights):
+    # Aggregate the updates according their weights
+    normalws = np.array(weights, dtype=float) / np.sum(weights, dtype=np.float)
+    agg_gradient_dict = {}
+    
+    ''' We dont aggregate the BN layer, Ref: https://arxiv.org/abs/2102.07623 '''
+    param_names = __layer_names_filter(list(gradients[0].keys()), filter_type='BN')
+
+    for name in param_names:
+        param_values = [g[name].detach().cpu().numpy() for g in gradients]
+        weighted_param_values = np.sum([pv * weight for pv, weight in zip(param_values, normalws)], axis=0)
+        agg_gradient_dict[name] = torch.from_numpy(weighted_param_values)
+    return agg_gradient_dict
+
+# Filter some unwant aggregate layer names
+def __layer_names_filter(layer_names, filter_type):
+    names_to_filter = []
+    if filter_type == 'BN':
+        for name in layer_names:
+            if 'running_mean' in name:
+                names_to_filter += [
+                    name,
+                    name.replace('running_mean', 'num_batches_tracked'),
+                    name.replace('running_mean', 'running_var'),
+                    name.replace('running_mean', 'weight'),
+                    name.replace('running_mean', 'bias'),
+                ]
+
+    retained_names = [name for name in layer_names if name not in names_to_filter]
+    return retained_names
+
+'''
+def __apply_gradient(state_dict, gradients):
+    for name in gradients:
+        torch.add(state_dict[name], gradients[name])
+    return state_dict
+'''     

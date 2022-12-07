@@ -82,13 +82,15 @@ class Server(Actor):
             logging.debug(f'Selected Nodes: {[node.name for node in selected_nodes]} cannot be test locally.')
             return
         for node in valid_nodes:
-            rlt = node.train()
+            rlt = node.test()
             results.append(rlt)
         return results
 
     def test_locally(self):
+        results = []
         if self.check_testable(locally=True) == True:
-            return self.local_actor.test()
+            results.append(self.local_actor.test())
+            return results
         else:
             logging.debug('Sever cannot be test locally.')
             return

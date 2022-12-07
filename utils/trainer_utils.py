@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import random
 from utils.model_utils import calculate_model_state_difference
+from termcolor import colored
 
 '''
     Read the config of trainer,
@@ -121,9 +122,33 @@ def __layer_names_filter(layer_names, filter_type):
     retained_names = [name for name in layer_names if name not in names_to_filter]
     return retained_names
 
-'''
-def __apply_gradient(state_dict, gradients):
-    for name in gradients:
-        torch.add(state_dict[name], gradients[name])
-    return state_dict
-'''     
+def summary_results(comm_round, train_results=None, test_results=None, actor_type='NNActor'):
+    '''
+    Inputs:
+        The <train_results> are <test_results> list of client's training and testing statistical data
+        See the <train>/<test> function of train/test actor for more informations
+        For example: <train_results> of NNActor: 
+            num_samples, train_scores, train_loss, t1_model_state, gradient, metric_names
+    '''
+    if actor_type == 'NNActor':
+        
+        if train_results:
+            nks = [rst[0] for rst in train_results]
+            # The -1 means we only consider the train scores of lastest epoch or step
+            train_scores = [rst[1][-1] for rst in train_results]
+            train_losses = [rst[2][-1] for rst in train_results]
+            
+            weighted_train_scores = np.average(train_scores, weights=nks, axis=0)
+            weighted_train_loss = np.average(train_losses, weights=nks)
+            
+            print(colored(f'Round {comm_round}, Train Score: {weighted_train_scores},\
+                    Train Loss: {round(weighted_train_loss, 4)}', 'blue', attrs=['reverse']))
+        if test_results:
+            nks = [rst[0] for rst in test_results]
+            test_scores = [rst[1][-1] for rst in test_results]
+            test_losses = [rst[2][-1] for rst in test_results]
+            weighted_test_scores = np.average(test_scores, weights=nks, axis=0)
+            weighted_test_loss = np.average(test_losses, weights=nks)
+            print(colored(f'Round {comm_round}, Test ACC: {weighted_test_scores},\
+                    Test Loss: {round(weighted_test_loss, 4)}', 'red', attrs=['reverse']))
+

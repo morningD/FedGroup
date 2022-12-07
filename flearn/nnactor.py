@@ -6,6 +6,7 @@ from copy import deepcopy
 from collections import OrderedDict
 import numpy as np
 from utils.model_utils import calculate_model_state_difference
+import time
 
 '''
 DNN Actor with torch train and test functions
@@ -26,10 +27,15 @@ class NNActor(Actor):
         if loss_fn is not None:
             self.loss_fn = loss_fn()
         else:
-            # We use the defalut loss fun defined in module class
+            # We use the defalut loss fun defined in model class
             self.loss_fn = self.model.loss_fn()
-    
-        self.metric_fns = metric_fns
+
+        if metric_fns != []:
+            self.metric_fns = metric_fns
+        else:
+            # We use the defult metrics functions defined in model class
+            self.metric_fns = self.model.metric_fns
+
         self.state.update({'init_params': None, 'latest_params': None, 'latest_updates': None, 
                             'local_soln': None, 'local_gradient': None, 'optimizer': None,
                             'train_scores_history': [], 'train_loss_history': [], 
@@ -83,7 +89,20 @@ class NNActor(Actor):
     def train(self):  
         if self.check_trainable() == False:
             return
-        return self.train_locally()
+        
+        start_time = time.time()
+        ''' Training Start '''
+        results = self.train_locally()
+        ''' Training End '''
+        train_time = round(time.time() - start_time, 3)
+
+        # Add some additional train information
+        add_info = {
+            'actor_type': self.actor_type,
+            'metric_names': tuple([mfn.__name__ for mfn in self.metric_fns]),
+            'time': train_time}
+
+        return *results, add_info
     
     def solve_epochs(self, num_epochs:int=1, pretrain:bool=False):
         # Set the train mode flag
@@ -195,10 +214,24 @@ class NNActor(Actor):
     def test(self):  
         if self.check_testable() == False:
             return
+        
+        start_time = time.time()
+        ''' Testing Start '''
         num_samples, test_scores, test_loss = self.test_locally()
+        ''' Testing End '''
+        test_time = round(time.time() - start_time, 3)
+        
+        # Add some additional train information
+        add_info = {
+            'actor_type': self.actor_type,
+            'metric_names': tuple([mfn.__name__ for mfn in self.metric_fns]),
+            'time': test_time}
+
         self.state['test_scores_history'] += test_scores
         self.state['test_loss_history'] += test_loss
-        return num_samples, test_scores, test_loss
+        # Return the eval mtric names of this actor for further use
+        # metric_names = tuple([mfn.__name__ for mfn in self.metric_fns])
+        return num_samples, test_scores, test_loss, add_info
     
     ''' Test on the local test dataset'''
     def test_locally(self):
@@ -207,7 +240,7 @@ class NNActor(Actor):
         test_scores, test_loss = [], []
         num_samples = len(self.test_loader.dataset)
         
-        # Load model state and optimizer state from this client
+        # Load model state (without optimizer state) from this client
         self.__load_state(is_train=False)
 
         with torch.no_grad():
@@ -226,8 +259,7 @@ class NNActor(Actor):
             loss_mean = loss_sum / num_samples
             y_true, y_pred = np.hstack(targets_list), np.hstack(preds_list)
             scores = tuple([mfn(y_true, y_pred) for mfn in self.metric_fns])
-            print(y_true)
-            print(y_pred)
+            #print(f'True Labels: {y_true} \n Pred Labels: {y_pred}')
 
             test_loss.append(loss_mean)
             test_scores.append(scores)
@@ -261,7 +293,7 @@ class NNActor(Actor):
         
         return self.state['testable']
     
-    # Manually apply the gradient to the model parameters and fresh latest_update
+    # Manually apply per param gradients to the model parameters and fresh latest_update
     # It is useful for apply aggregated gradients
     @torch.no_grad()
     def apply_gradient(self, gradients):

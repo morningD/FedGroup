@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.optim as optim
+from utils.model_utils import fscore, adjusted_balanced_accuracy
 
 '''
 class ABIDE_MLP(nn.Module):
@@ -34,8 +35,11 @@ class ABIDE_MLP(nn.Module):
             nn.Dropout(),
             nn.Linear(8, 2)
         )
+        
         # The default loss function
         self.loss_fn = nn.CrossEntropyLoss
+        # The defalut evaluate metric functions
+        self.metric_fns = [fscore, adjusted_balanced_accuracy]
         # The default actor type
         self.actor_type = 'NNActor'
 

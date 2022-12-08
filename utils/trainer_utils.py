@@ -19,6 +19,7 @@ def read_json_config(path, dsname, model, trainer):
     dsname, model, trainer = dsname.lower(), model.lower(), trainer.lower()
     config['trainer'] = __refine_config(cfg['trainer_config'], dsname, model, trainer)
     config['client'] = __refine_config(cfg['client_config'], dsname, model, trainer)
+    config['preprocess'] = __refine_config(cfg['preprocess_config'], dsname, model, trainer)
     if trainer in ['ifca', 'fesem', 'fedgroup']:
         config['group'] = __refine_config(cfg['group_config'], dsname, model, trainer)
     return config

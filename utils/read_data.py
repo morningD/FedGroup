@@ -13,7 +13,7 @@ Load datasets from files
 In:     Dataset Name (str)
 Out:    List of PyTorch Dataset
 """
-def read_federated_data(dsname:str, data_base_path=None):
+def read_federated_data(dsname:str, data_base_path=None, preprocess_cfg={}):
 
     logging.basicConfig(filename='read_data.log', encoding='utf-8', level=logging.DEBUG, \
         format='%(asctime)s [%(filename)s:%(funcName)s:%(lineno)d] %(message)s', datefmt='%m/%d/%Y %I:%M:%S %p')
@@ -23,13 +23,13 @@ def read_federated_data(dsname:str, data_base_path=None):
     val_loaders = None
     dsname = dsname.lower()
     if dsname == 'digits':
-        train_loaders, test_loaders = read_digits(percent=1.0, batch=32)
+        train_loaders, test_loaders = read_digits(**preprocess_cfg)
     if dsname == 'office':
-        train_loaders, val_loaders, test_loaders = read_office(batch=32)
+        train_loaders, val_loaders, test_loaders = read_office(**preprocess_cfg)
     if dsname == 'domainnet':
-        train_loaders, val_loaders, test_loaders = read_domainnet()
+        train_loaders, val_loaders, test_loaders = read_domainnet(**preprocess_cfg)
     if dsname == 'abide':
-        train_loaders, test_loaders = read_abide(percent=0.5, batch=32, return_loader=True)
+        train_loaders, test_loaders = read_abide(**preprocess_cfg)
     
     return train_loaders, val_loaders, test_loaders
 
@@ -183,7 +183,7 @@ def read_office(batch=32):
     return train_loaders, val_loaders, test_loaders
 
 # Borrow form FedBN
-def read_domainnet():
+def read_domainnet(batch):
     transform_train = transforms.Compose([
             transforms.Resize([256, 256]),            
             transforms.RandomHorizontalFlip(),
@@ -238,29 +238,29 @@ def read_domainnet():
     sketch_trainset = torch.utils.data.Subset(sketch_trainset, list(range(min_data_len)))
 
 
-    clipart_train_loader = torch.utils.data.DataLoader(clipart_trainset, batch_size=32, shuffle=True)
-    clipart_val_loader   = torch.utils.data.DataLoader(clipart_valset, batch_size=32, shuffle=False)
-    clipart_test_loader  = torch.utils.data.DataLoader(clipart_testset, batch_size=32, shuffle=False)
+    clipart_train_loader = torch.utils.data.DataLoader(clipart_trainset, batch_size=batch, shuffle=True)
+    clipart_val_loader   = torch.utils.data.DataLoader(clipart_valset, batch_size=batch, shuffle=False)
+    clipart_test_loader  = torch.utils.data.DataLoader(clipart_testset, batch_size=batch, shuffle=False)
 
-    infograph_train_loader = torch.utils.data.DataLoader(infograph_trainset, batch_size=32, shuffle=True)
-    infograph_val_loader = torch.utils.data.DataLoader(infograph_valset, batch_size=32, shuffle=False)
-    infograph_test_loader = torch.utils.data.DataLoader(infograph_testset, batch_size=32, shuffle=False)
+    infograph_train_loader = torch.utils.data.DataLoader(infograph_trainset, batch_size=batch, shuffle=True)
+    infograph_val_loader = torch.utils.data.DataLoader(infograph_valset, batch_size=batch, shuffle=False)
+    infograph_test_loader = torch.utils.data.DataLoader(infograph_testset, batch_size=batch, shuffle=False)
 
-    painting_train_loader = torch.utils.data.DataLoader(painting_trainset, batch_size=32, shuffle=True)
-    painting_val_loader = torch.utils.data.DataLoader(painting_valset, batch_size=32, shuffle=False)
-    painting_test_loader = torch.utils.data.DataLoader(painting_testset, batch_size=32, shuffle=False)
+    painting_train_loader = torch.utils.data.DataLoader(painting_trainset, batch_size=batch, shuffle=True)
+    painting_val_loader = torch.utils.data.DataLoader(painting_valset, batch_size=batch, shuffle=False)
+    painting_test_loader = torch.utils.data.DataLoader(painting_testset, batch_size=batch, shuffle=False)
 
-    quickdraw_train_loader = torch.utils.data.DataLoader(quickdraw_trainset, batch_size=32, shuffle=True)
-    quickdraw_val_loader = torch.utils.data.DataLoader(quickdraw_valset, batch_size=32, shuffle=False)
-    quickdraw_test_loader = torch.utils.data.DataLoader(quickdraw_testset, batch_size=32, shuffle=False)
+    quickdraw_train_loader = torch.utils.data.DataLoader(quickdraw_trainset, batch_size=batch, shuffle=True)
+    quickdraw_val_loader = torch.utils.data.DataLoader(quickdraw_valset, batch_size=batch, shuffle=False)
+    quickdraw_test_loader = torch.utils.data.DataLoader(quickdraw_testset, batch_size=batch, shuffle=False)
 
-    real_train_loader = torch.utils.data.DataLoader(real_trainset, batch_size=32, shuffle=True)
-    real_val_loader = torch.utils.data.DataLoader(real_valset, batch_size=32, shuffle=False)
-    real_test_loader = torch.utils.data.DataLoader(real_testset, batch_size=32, shuffle=False)
+    real_train_loader = torch.utils.data.DataLoader(real_trainset, batch_size=batch, shuffle=True)
+    real_val_loader = torch.utils.data.DataLoader(real_valset, batch_size=batch, shuffle=False)
+    real_test_loader = torch.utils.data.DataLoader(real_testset, batch_size=batch, shuffle=False)
 
-    sketch_train_loader = torch.utils.data.DataLoader(sketch_trainset, batch_size=32, shuffle=True)
-    sketch_val_loader = torch.utils.data.DataLoader(sketch_valset, batch_size=32, shuffle=False)
-    sketch_test_loader = torch.utils.data.DataLoader(sketch_testset, batch_size=32, shuffle=False)
+    sketch_train_loader = torch.utils.data.DataLoader(sketch_trainset, batch_size=batch, shuffle=True)
+    sketch_val_loader = torch.utils.data.DataLoader(sketch_valset, batch_size=batch, shuffle=False)
+    sketch_test_loader = torch.utils.data.DataLoader(sketch_testset, batch_size=batch, shuffle=False)
     
 
     train_loaders = [clipart_train_loader, infograph_train_loader, painting_train_loader, quickdraw_train_loader, real_train_loader, sketch_train_loader]
@@ -274,7 +274,7 @@ def read_domainnet():
     nilearn source code: https://github.com/nilearn/nilearn/blob/d628bf6b/nilearn/datasets/func.py#L857
     Input:  percent-> how many sites' data are involved; batch-> batch_size
 """
-def read_abide(percent=0.5, batch=32, strategy='correlation', return_loader=True):
+def read_abide(percent=0.5, batch=32, strategy='correlation', return_loader=True, label='DX_GROUP'):
     data_path = Path(_data_base_path).joinpath('ABIDE') # The default data download path = <FedGroup>/data/ABIDE
     Path.mkdir(data_path, exist_ok=True) # Create a new dir if no exist
     
@@ -296,7 +296,7 @@ def read_abide(percent=0.5, batch=32, strategy='correlation', return_loader=True
         3, Train/Test split by the site (split by domain)
         4, Save the preprocessed data
     """
-    train_h5_path, test_h5_path =  _preprocess_abide(cached_pkl_path, percent, strategy)
+    train_h5_path, test_h5_path =  _preprocess_abide(cached_pkl_path, percent, strategy, label)
 
     if return_loader == True:
         transform = transforms.ToTensor()

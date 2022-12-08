@@ -3,8 +3,8 @@ from collections import OrderedDict
 import torch
 
 def fscore(y_true, y_pred):
-    # For ABIDE, Austism Label = 1-1 = 0
-    return f1_score(y_true, y_pred, pos_label=0)
+    # For ABIDE, Austism Label = abs(1-2) = 1
+    return f1_score(y_true, y_pred, pos_label=1)
 
 def accuracy(y_true, y_pred):
     return accuracy_score(y_true, y_pred)

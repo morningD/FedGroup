@@ -33,6 +33,21 @@
             "learning_rate": 0.001
         }
     },
+
+    "preprocess_config":
+    {
+        "common":
+        {
+            "batch": 32
+        },
+        "abide":
+        {
+            "label": "SEX",
+            "return_loader": true,
+            "percent": 0.5
+        }
+
+    },
     
     "group_config":
     {   "common":

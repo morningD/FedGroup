@@ -135,12 +135,12 @@ class DomainNetDataset(Dataset):
 class ABIDE1Dataset(Dataset):
     def __init__(self, sitename, data, label, train=True, transform=None):
             
-        self.label_dict = {'autism':1, 'control':2}
+        self.label_dict = {'autism':1, 'control':0}
         self.transform = transform
         self.train = train
         self.sitename = sitename
         self.images = data.astype(np.float32)
-        self.labels = np.subtract(label, 1).astype(np.uint8) # 0 ->austism, 1->control
+        self.labels = label.astype(np.uint8) # 0 ->austism, 1->control
 
     def __len__(self):
         return self.labels.shape[0]
@@ -201,10 +201,10 @@ def _fetch_transform_abide(cached_pkl_path):
     # 'func_preproc': <list>}, list of scan file proxy paths with nii.gz format (can load by Nibable)
     abide = fetch_abide_pcp(data_dir=data_path, legacy_format=True)
     
-    # path_label_dict: {'./Caltech_0051461_func_preproc.nii.gz': 1=Austism or 2=Control, ...}
-    path_label_dict = {}
+    # path_phenotypic_dict: {'./Caltech_0051461_func_preproc.nii.gz': phenotypic {'DX_GROUP':1=Austism or 2=Control, 'SEX': 1=Male or 2=Female}, ...}
+    path_phenotypic_dict = {}
     for idx, fpath in enumerate(abide.func_preproc):
-        path_label_dict[fpath] = abide.phenotypic['DX_GROUP'][idx]
+        path_phenotypic_dict[fpath] = abide.phenotypic[:][idx]
 
     # Download Harvard-Oxford atlas
     atlas = fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm', data_dir=data_path) # It is a 3D deterministic atlas
@@ -240,9 +240,9 @@ def _fetch_transform_abide(cached_pkl_path):
     sitename_data_dict = {}
     for path in path_signal_dict:
         site_name = Path(path).name.split('_')[0]
-        # sitename_data_dict-> {sitename: list of tuple like (signal, label, length, path)}
-        signal, label = path_signal_dict[path], path_label_dict[path]
-        data_tuple = (signal, label, signal.shape[0], path)
+        # sitename_data_dict-> {sitename: list of tuple like (signal, phenotypic, length, path)}
+        signal, phenotypic = path_signal_dict[path], path_phenotypic_dict[path]
+        data_tuple = (signal, phenotypic, signal.shape[0], path)
         sitename_data_dict.setdefault(site_name, []).append(data_tuple)
 
     # Save these signals data to a pickle file
@@ -252,8 +252,19 @@ def _fetch_transform_abide(cached_pkl_path):
     return sitename_data_dict
 
 """ Preprocess ABIDE
+    label should be listed in ABIDE I datalegend: http://fcon_1000.projects.nitrc.org/indi/abide/ABIDE_LEGEND_V1.02.pdf
 """
-def _preprocess_abide(cached_pkl_path, percent, strategy='correlation'):
+def _preprocess_abide(cached_pkl_path, percent, strategy='correlation', label='DX_GROUP'):
+
+    def preprocess_phenotypic(phenotypic, label):
+        if label == "DX_GROUP": # From 1=Austism, 2=Control to 1=Austism (Positive), 0=Control
+            return abs(phenotypic[label] - 2)
+        if label == 'SEX': # From 1=Male, 2=Female to 0=Male, 2=Female
+            return phenotypic[label] - 1
+        if label == 'AGE_AT_SCAN':
+            age_min, age_max = 6.47, 64
+            return (phenotypic[label] - age_min) / (age_max-age_min)
+
     with open(cached_pkl_path, 'rb') as pklf:
         sitename_data_dict = pickle.load(pklf)
     
@@ -326,7 +337,7 @@ def _preprocess_abide(cached_pkl_path, percent, strategy='correlation'):
             h5writer = ta if name in keep_site_name[:K] else te
             grp = h5writer.require_group(name)
             x = np.stack([tuple[0] for tuple in sitename_data_dict[name]], axis=0)
-            y = np.array([tuple[1] for tuple in sitename_data_dict[name]], dtype=np.uint8)
+            y = np.array([preprocess_phenotypic(tuple[1], label) for tuple in sitename_data_dict[name]], dtype=np.uint8)
             grp.create_dataset('x', data=x)
             grp.create_dataset('y', data=y)
     

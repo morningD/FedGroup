@@ -15,7 +15,7 @@ class FedAvg(object):
         # Read config from json file
         trainer = self.__class__.__name__
         cfg = read_json_config(cfg_path, dsname, mname, trainer)
-        self.trainer_cfg, self.client_cfg = cfg['trainer'], cfg['client']
+        self.trainer_cfg, self.client_cfg, self.preprocess_cfg = cfg['trainer'], cfg['client'], cfg['preprocess']
         
         # Set configs as attribute
         for key, val in self.trainer_cfg.items(): 
@@ -26,11 +26,11 @@ class FedAvg(object):
         fix_seed(self.seed)
 
         # Create actors
-        self.construct_actors(dsname, mname, actor_type, self.trainer_cfg, self.client_cfg)
+        self.construct_actors(dsname, mname, actor_type, self.trainer_cfg, self.client_cfg, self.preprocess_cfg)
 
-    def construct_actors(self, dsname, mname, actor_type, trainer_cfg, client_cfg):
+    def construct_actors(self, dsname, mname, actor_type, trainer_cfg, client_cfg, preprocess_cfg):
         ''' 1, Read dataset and construct dataloaders for each client '''
-        train_loaders, val_loaders, test_loaders = read_federated_data(dsname)
+        train_loaders, val_loaders, test_loaders = read_federated_data(dsname, preprocess_cfg)
         self.num_train_clients, self.num_test_clients = len(train_loaders), len(test_loaders)
 
         ''' 2, Get model loader according to dataset and model name and construct the model '''
